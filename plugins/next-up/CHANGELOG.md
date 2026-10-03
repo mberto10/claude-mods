@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 · 2026-10-03
+
+- The suggestions above the prompt now stack with lines other mods draw there instead of hiding them: while Next up is thinking or showing steps, another mod's line stays visible below.
+
 ## 0.1.0 · 2026-10-02
 
 First public release.

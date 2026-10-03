@@ -435,14 +435,16 @@ export const register: Register = (on, options) => {
       return next(e)
     }
 
+    const beneath = await next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const width = Math.max(20, e.props.bodyColumns - 16)
     const mode = await modeNow($)
 
     if (shown.length === 0) {
       return (
-        <Box>
+        <Box flexDirection="column">
           <Text dimColor>{`Next up (${mode}): thinking…`}</Text>
+          {beneath}
         </Box>
       )
     }
@@ -466,6 +468,7 @@ export const register: Register = (on, options) => {
           </Box>
         ))}
         <Button key="dismiss" plain hotkey="0" label="dismiss" onPress={() => clear($)} />
+        {beneath}
       </Box>
     )
   })

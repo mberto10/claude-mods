@@ -1,6 +1,6 @@
 {
   "name": "next-up",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "When a turn ends, suggests up to three next prompts from the conversation, your open GitHub issues and pull requests, or your Linear issues.",
   "author": {
     "name": "Maximilian Bruhn"
