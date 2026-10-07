@@ -1,0 +1,32 @@
+{
+  "name": "linear-tree",
+  "version": "0.1.0",
+  "description": "A Claude Code mod: a Linear project as a tree and a flowchart in a side pane, with progress, search, filters, shortcuts and markers on the issues agents are working on.",
+  "author": {
+    "name": "Maximilian Bruhn"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "defaultProject": {
+      "type": "string",
+      "title": "Default project",
+      "description": "The Linear project /tree shows when none is named and none was shown before. Empty (default): the first project in .claude/next-up.json, if any.",
+      "required": false,
+      "default": ""
+    },
+    "linearServer": {
+      "type": "string",
+      "title": "Linear server",
+      "description": "The Linear MCP server's name as /mcp lists it. Empty (default): the server whose list_issues tool is Linear's, then \"claude.ai Linear\", \"Linear\" and \"linear\".",
+      "required": false,
+      "default": ""
+    },
+    "refreshMinutes": {
+      "type": "number",
+      "title": "Refresh every (minutes)",
+      "description": "While the pane is shown, reload the tree this often; 0 turns it off (default 5).",
+      "required": false,
+      "default": 5
+    }
+  }
+}
