@@ -1,7 +1,7 @@
 import type { On, SessionStartInput } from 'claude-code'
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
 
-import { asksPerson, budgeted, digestOf, MODES, modeOf, pickOf, rankPromptOf, stepsOf } from '../hooks/rank'
+import { asksPerson, budgeted, digestOf, MIN_ANSWER_CHARS, MODES, modeOf, pickOf, rankPromptOf, shouldRank, stepsOf } from '../hooks/rank'
 import { githubIssuesOf, linearIssuesOf, linearServersOf, type WorkItem } from '../hooks/sources'
 
 tier('user')
@@ -112,7 +112,19 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers') {
 
 const continuations = (...labels: string[]) => JSON.stringify(labels.map(label => ({ label, prompt: `${label}, please.`, source: 'continue', ref: null })))
 
-const answered = (answer: string) => ({ answer, durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' as const })
+/** A turn whose answer is exactly `answer`. */
+const turnOf = (answer: string) => ({ answer, durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' as const })
+
+/** The body of a normal-length answer: long enough that the ranker is called. */
+const BODY = 'I changed the parser so that anchors handle CRLF line endings, added a test for each of the three cases, ran the whole suite again, and checked that the diff stays small enough to review in one sitting. '
+
+/** A finished answer of normal length that ends with `ending`. */
+const answered = (ending: string) => turnOf(`${BODY}${ending}`)
+
+/** The engine's usage op, answering with one rate-limit window at `percentUsed`. */
+function usageAt(on: On, percentUsed: number) {
+  on('session.usage', () => ({ value: { context: { window: 200_000 }, rateLimits: [{ kind: 'five_hour', percentUsed }] } }))
+}
 
 describe('parsing', () => {
   test('closed Linear issues are left out; open ones rank by state, then priority', async () => {
@@ -527,5 +539,63 @@ describe('next up', () => {
     expect(sent.drop).toBe('Next up: steps dismissed')
     expect(w.prompts).toEqual([])
     expect(JSON.stringify(await band.drawn())).not.toContain('Tidy the diff')
+  })
+})
+
+describe('when the ranker runs', () => {
+  test('shouldRank: one place decides, from the turn and the usage windows', async () => {
+    const normal = { ...answered('Done.'), rateLimits: [] }
+
+    expect(BODY.length).toBeGreaterThanOrEqual(MIN_ANSWER_CHARS)
+    expect(shouldRank(normal)).toBe(true)
+    expect(shouldRank({ ...normal, rateLimits: [{ kind: 'five_hour', percentUsed: 89.9 }] })).toBe(true)
+    expect(shouldRank({ ...turnOf('Done.'), rateLimits: [] })).toBe(false)
+    expect(shouldRank({ ...turnOf('x'.repeat(MIN_ANSWER_CHARS - 1)), rateLimits: [] })).toBe(false)
+    expect(shouldRank({ ...turnOf('x'.repeat(MIN_ANSWER_CHARS)), rateLimits: [] })).toBe(true)
+    expect(shouldRank({ ...normal, rateLimits: [{ kind: 'five_hour', percentUsed: 12 }, { kind: 'seven_day', percentUsed: 90 }] })).toBe(false)
+    expect(shouldRank({ ...normal, agentId: 'a1' })).toBe(false)
+    expect(shouldRank({ ...normal, reason: 'error' })).toBe(false)
+    expect(shouldRank({ ...normal, reason: 'aborted', isAborted: true })).toBe(false)
+    expect(shouldRank({ ...answered('Should I also add tests?'), rateLimits: [] })).toBe(false)
+  })
+
+  test('a short answer calls no ranker and draws no band', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.turn.complete(turnOf('Done.'))
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+
+    const drawn = JSON.stringify(await (await $.ui.mount(BAND)).drawn())
+
+    expect(drawn).not.toContain('Next up')
+    expect(drawn).toContain('(engine band)')
+  })
+
+  test('a usage window at 90% calls no ranker and draws no band', async ($, on) => {
+    const w = world(on)
+    usageAt(on, 90)
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+
+    const drawn = JSON.stringify(await (await $.ui.mount(BAND)).drawn())
+
+    expect(drawn).not.toContain('Next up')
+    expect(drawn).toContain('(engine band)')
+  })
+
+  test('a normal answer under the usage limit still reaches the ranker', async ($, on) => {
+    const w = world(on)
+    usageAt(on, 40)
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    expect(w.completes).toHaveLength(1)
+    expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).toContain('Next up (conversation) · type a number')
   })
 })
