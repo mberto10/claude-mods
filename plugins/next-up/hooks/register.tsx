@@ -38,6 +38,7 @@ const runtime: {
   reads: { github: SourceRead; linear: SourceRead } | null
   lastPrompt: string
   drawn: NextStep[]
+  isDismissed: boolean
   generation: number
   isWarned: boolean
 } = {
@@ -48,6 +49,7 @@ const runtime: {
   reads: null,
   lastPrompt: '',
   drawn: [],
+  isDismissed: false,
   generation: 0,
   isWarned: false,
 }
@@ -224,6 +226,21 @@ async function clear($: EngineInterface): Promise<void> {
   await update($, isThinking, () => false)
 }
 
+/**
+ * The band's `0`. The desktop may also leave the typed `0` in the prompt
+ * box, before or after this runs: a box holding only `0` is emptied, and
+ * a lone `0` sent right after is dropped. Anything else typed stays.
+ */
+async function dismiss($: EngineInterface): Promise<void> {
+  await clear($)
+  runtime.isDismissed = true
+  const box = await $.prompt.read()
+
+  if (box.text.trim() === '0') {
+    await $.prompt.fill({ text: '', mode: 'replace' })
+  }
+}
+
 const HELP = `/next refresh · /next sources · /next mode <${MODES.join('|')}>`
 
 /**
@@ -319,11 +336,19 @@ export const register: Register = (on, options) => {
   /**
    * A slash command passes through and keeps the steps. Any other typed
    * prompt clears them; a bare number picks that row of the set the band
-   * last drew, which is what the person sees, not the stored steps.
+   * last drew, which is what the person sees, not the stored steps. A
+   * lone `0` right after a dismiss is the dismiss's digit, and is dropped.
    */
   on('prompt.submit', async ($, e, next) => {
     if (e.origin?.kind === 'plugin' || e.command !== undefined) {
       return next(e)
+    }
+
+    const isDismissed = runtime.isDismissed
+    runtime.isDismissed = false
+
+    if (isDismissed && e.text.trim() === '0') {
+      return { drop: 'Next up: steps dismissed' }
     }
 
     const drawn = runtime.drawn
@@ -364,6 +389,8 @@ export const register: Register = (on, options) => {
       )
     }
 
+    runtime.isDismissed = false
+
     return (
       <Box flexDirection="column">
         <Text dimColor>{`Next up (${mode}) · type a number and Enter to send it, or click one to edit it first`}</Text>
@@ -382,7 +409,7 @@ export const register: Register = (on, options) => {
             <Text dimColor>{`  ${step.ref ?? step.source}${step.why !== null ? ` · ${step.why}` : ''}`}</Text>
           </Box>
         ))}
-        <Button key="dismiss" plain hotkey="0" label="dismiss" onPress={() => clear($)} />
+        <Button key="dismiss" plain hotkey="0" label="dismiss" onPress={() => dismiss($)} />
         {beneath}
       </Box>
     )
