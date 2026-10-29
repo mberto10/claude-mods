@@ -1,7 +1,7 @@
 import type { On, SessionStartInput } from 'claude-code'
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
 
-import { asksPerson, budgeted, digestOf, MODES, modeOf, pickOf, rankPromptOf, stepsOf } from '../hooks/rank'
+import { asksPerson, budgeted, digestOf, KINDS, MODES, modeOf, pickOf, rankPromptOf, stepsOf } from '../hooks/rank'
 import { githubIssuesOf, linearIssuesOf, linearServersOf, type WorkItem } from '../hooks/sources'
 
 tier('user')
@@ -527,5 +527,123 @@ describe('next up', () => {
     expect(sent.drop).toBe('Next up: steps dismissed')
     expect(w.prompts).toEqual([])
     expect(JSON.stringify(await band.drawn())).not.toContain('Tidy the diff')
+  })
+})
+
+type Drawn = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
+
+type Row = { tag: string | null; isTagMuted: boolean; label: string; trail: string }
+
+/** The band's step rows: the Text before each step Button (its tag), the Button's label and the Text after it. */
+function rowsOf(tree: unknown): Row[] {
+  const textOf = (node: Drawn | undefined) => (node?.children ?? []).filter(child => typeof child === 'string').join('').trim()
+  const rows: Row[] = []
+  const visit = (node: unknown) => {
+    if (typeof node !== 'object' || node === null) {
+      return
+    }
+
+    const children = ((node as Drawn).children ?? []) as Drawn[]
+    const at = children.findIndex(child => child?.type === 'Button' && String(child.props?.key ?? '').startsWith('step-'))
+
+    if (at === -1) {
+      children.forEach(visit)
+
+      return
+    }
+
+    const before = at > 0 ? children[at - 1] : undefined
+    rows.push({
+      tag: before === undefined ? null : textOf(before),
+      isTagMuted: before === undefined || before.props?.dimColor === true,
+      label: String(children[at]!.props?.label ?? ''),
+      trail: textOf(children[at + 1]),
+    })
+  }
+  visit(tree)
+
+  return rows
+}
+
+const KINDED = JSON.stringify([
+  { kind: 'continue', label: 'Handle CRLF in the writer too', prompt: 'Handle CRLF in the writer too.', source: 'continue', ref: null, why: 'same bug, second file' },
+  { kind: 'verify', label: 'Run the parser tests', prompt: 'Run the parser tests.', source: 'continue', ref: null, why: 'checks the fix' },
+  { kind: 'deploy', label: 'Push it live', prompt: 'Push it live.', source: 'continue', ref: null, why: 'work is finished' },
+])
+
+describe('step kinds', () => {
+  test('stepsOf parses kind and drops a missing or unknown kind to no label', async () => {
+    const answer = JSON.stringify([
+      { kind: 'continue', label: 'A', prompt: 'a', source: 'continue', ref: null },
+      { kind: ' Verify ', label: 'B', prompt: 'b', source: 'continue', ref: null },
+      { kind: 'deploy', label: 'C', prompt: 'c', source: 'continue', ref: null },
+    ])
+    const more = JSON.stringify([
+      { label: 'D', prompt: 'd', source: 'continue', ref: null },
+      { kind: 3, label: 'E', prompt: 'e', source: 'continue', ref: null },
+      { kind: 'ship', label: 'F', prompt: 'f', source: 'continue', ref: null },
+    ])
+
+    expect([...KINDS]).toEqual(['continue', 'verify', 'ship', 'issue'])
+    expect(stepsOf(answer, 'conversation').map(step => [step.label, step.kind])).toEqual([['A', 'continue'], ['B', 'verify'], ['C', null]])
+    expect(stepsOf(more, 'conversation').map(step => [step.label, step.kind])).toEqual([['D', null], ['E', null], ['F', 'ship']])
+    expect(stepsOf(JSON.stringify([{ kind: 'issue', label: 'G', prompt: 'g', source: 'linear', ref: 'ENG-42' }]), 'linear')[0]?.kind).toBe('issue')
+  })
+
+  test('the ranker prompt names the kind set and the one-per-kind rule, with issue exempt in linear and github', async () => {
+    const digest = digestOf('Fix it.', 'Done.')
+
+    for (const mode of MODES) {
+      const prompt = rankPromptOf([], mode, digest)
+
+      for (const kind of KINDS) {
+        expect(prompt).toContain(`${kind} (`)
+      }
+
+      expect(prompt).toContain('No two steps share a kind')
+      expect(prompt).toContain('"kind": "<continue, verify, ship or issue>"')
+    }
+
+    expect(rankPromptOf([], 'linear', digest)).toContain('except issue: several steps may be issue steps')
+    expect(rankPromptOf([], 'github', digest)).toContain('except issue: several steps may be issue steps')
+    expect(rankPromptOf([], 'conversation', digest)).not.toContain('except issue')
+  })
+
+  test('the band draws a muted tag before each labelled row and shows the kind once', async ($, on) => {
+    const w = world(on)
+    w.replies.push(KINDED)
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    const band = await $.ui.mount(BAND)
+    const tree: unknown = await band.drawn()
+    const rows = rowsOf(tree)
+
+    expect(rows.map(row => row.tag)).toEqual(['continue', 'verify', ''])
+    expect(rows.every(row => row.isTagMuted)).toBe(true)
+    expect(rows.map(row => row.label)).toEqual(['Handle CRLF in the writer too', 'Run the parser tests', 'Push it live'])
+    expect(rows.map(row => row.trail)).toEqual(['same bug, second file', 'checks the fix', 'continue · work is finished'])
+    expect(JSON.stringify(tree).match(/continue/g)).toHaveLength(2)
+
+    await band.press({ key: 'step-1' })
+
+    expect(w.fills).toEqual(['Run the parser tests.'])
+  })
+
+  test('a band with no kinds draws no tag, and its numbers still pick', async ($, on) => {
+    const w = world(on)
+    w.replies.push(continuations('Tidy the diff', 'Run the tests'))
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    const rows = rowsOf(await (await $.ui.mount(BAND)).drawn())
+
+    expect(rows.map(row => [row.tag, row.label, row.trail])).toEqual([[null, 'Tidy the diff', 'continue'], [null, 'Run the tests', 'continue']])
+
+    await $.prompt.submit({ text: '2' })
+
+    expect(w.prompts.at(-1)).toBe('Run the tests, please.')
   })
 })

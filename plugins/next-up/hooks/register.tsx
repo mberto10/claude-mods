@@ -19,6 +19,8 @@ const SOURCE_TIMEOUT_MS = 20_000
 const MODEL_TIMEOUT_MS = 30_000
 const MODEL = 'haiku'
 const PER_SOURCE = 12
+/** The kind tag column: the longest kind, "continue", and two spaces. */
+const TAG_COLUMNS = 10
 
 const steps = atom({ plugin: 'next-up', key: 'steps' } as const, [])
 const isThinking = atom({ plugin: 'next-up', key: 'isThinking' } as const, false)
@@ -400,24 +402,35 @@ export const register: Register = (on, options) => {
 
     runtime.isDismissed = false
 
+    // The kind tags form a muted column ahead of the rows when any step has
+    // one; a row without a kind keeps the column blank. A tagged row drops
+    // the source word after its label, since the tag already says "continue".
+    const isTagged = shown.some(step => step.kind !== null)
+    const labelWidth = isTagged ? Math.max(20, width - TAG_COLUMNS) : width
+
     return (
       <Box flexDirection="column">
         <Text dimColor>{`Next up (${mode}) · type a number and Enter to send it, or click one to edit it first`}</Text>
-        {shown.map((step, index) => (
-          <Box key={`row-${index}`}>
-            <Button
-              key={`step-${index}`}
-              plain
-              hotkey={String(index + 1)}
-              label={step.label.length > width ? `${step.label.slice(0, width - 1)}…` : step.label}
-              onPress={async () => {
-                await $.prompt.fill({ text: step.prompt, mode: 'replace' })
-                await clear($)
-              }}
-            />
-            <Text dimColor>{`  ${step.ref ?? step.source}${step.why !== null ? ` · ${step.why}` : ''}`}</Text>
-          </Box>
-        ))}
+        {shown.map((step, index) => {
+          const trail = [step.ref ?? (step.kind === null ? step.source : null), step.why].filter(part => part !== null).join(' · ')
+
+          return (
+            <Box key={`row-${index}`}>
+              {isTagged ? <Text dimColor>{(step.kind ?? '').padEnd(TAG_COLUMNS)}</Text> : null}
+              <Button
+                key={`step-${index}`}
+                plain
+                hotkey={String(index + 1)}
+                label={step.label.length > labelWidth ? `${step.label.slice(0, labelWidth - 1)}…` : step.label}
+                onPress={async () => {
+                  await $.prompt.fill({ text: step.prompt, mode: 'replace' })
+                  await clear($)
+                }}
+              />
+              {trail !== '' ? <Text dimColor>{`  ${trail}`}</Text> : null}
+            </Box>
+          )
+        })}
         <Button key="dismiss" plain hotkey="0" label="dismiss" onPress={() => dismiss($)} />
         {beneath}
       </Box>

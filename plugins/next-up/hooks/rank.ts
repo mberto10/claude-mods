@@ -1,10 +1,20 @@
-import type { NextStep, NextStepSource } from '../types'
+import type { NextStep, NextStepKind, NextStepSource } from '../types'
 import type { WorkItem } from './sources'
 
 const MAX_STEPS = 3
 const TITLE_CHARS = 90
 const DIGEST_CHARS = 1500
 const ALL_SOURCES: readonly NextStepSource[] = ['continue', 'github', 'linear']
+
+/** The kinds a step can be, in the order the ranker prompt names them. */
+export const KINDS: readonly NextStepKind[] = ['continue', 'verify', 'ship', 'issue']
+
+/** A kind from the set, or null for anything else. */
+export function kindOf(value: unknown): NextStepKind | null {
+  const name = typeof value === 'string' ? value.trim().toLowerCase() : ''
+
+  return (KINDS as readonly string[]).includes(name) ? (name as NextStepKind) : null
+}
 
 export const MODES = ['linear', 'github', 'conversation'] as const
 export type Mode = (typeof MODES)[number]
@@ -70,6 +80,15 @@ const GOALS: Record<Mode, string> = {
 
 const RESTRAINT = 'When no step clearly fits the current work, answer []. Never pad to three; fewer steps are fine.'
 
+const KIND_SET = 'Give each step one kind: continue (carries the current work on), verify (checks or tests what was done), ship (commits, pushes, opens a pull request or releases), issue (starts a Linear or GitHub item).'
+
+/** One step per kind; item modes may return several issue steps. */
+const ONE_PER_KIND: Record<Mode, string> = {
+  linear: 'No two steps share a kind, except issue: several steps may be issue steps.',
+  github: 'No two steps share a kind, except issue: several steps may be issue steps.',
+  conversation: 'No two steps share a kind.',
+}
+
 /** The question that picks the steps; `digest` is the last exchange. */
 export function rankPromptOf(items: readonly WorkItem[], mode: Mode, digest: string): string {
   const allowed = sourceOf(mode)
@@ -82,17 +101,19 @@ export function rankPromptOf(items: readonly WorkItem[], mode: Mode, digest: str
     `Suggest what the person could do next in a coding session.\n\n${digest}`,
     GOALS[mode],
     RESTRAINT,
+    `${KIND_SET} ${ONE_PER_KIND[mode]}`,
     'Write each step as the prompt the person would send the assistant: an instruction, at most 30 words, self-contained, naming the item\'s id when it is about one. Do not suggest something already done.',
     ...(mode === 'conversation' ? [] : ['', 'Open work items:', list]),
     '',
     'Answer with JSON only, no prose:',
-    `[{"label": "<at most 60 characters>", "prompt": "<the prompt>", "source": "${allowed}", "ref": "<item id, or null>", "why": "<why this one, at most 8 words>"}]`,
+    `[{"kind": "<continue, verify, ship or issue>", "label": "<at most 60 characters>", "prompt": "<the prompt>", "source": "${allowed}", "ref": "<item id, or null>", "why": "<why this one, at most 8 words>"}]`,
   ].join('\n')
 }
 
 /**
  * The model's answer as at most three valid steps from the mode's source.
  * A step naming another source is dropped; one naming none is the mode's.
+ * A step with a missing or unknown kind is kept, with no kind.
  */
 export function stepsOf(text: string, mode: Mode = DEFAULT_MODE): NextStep[] {
   const start = text.indexOf('[')
@@ -122,7 +143,7 @@ export function stepsOf(text: string, mode: Mode = DEFAULT_MODE): NextStep[] {
       continue
     }
 
-    const { label, prompt, source, ref, why } = one as Record<string, unknown>
+    const { kind, label, prompt, source, ref, why } = one as Record<string, unknown>
 
     if (typeof label !== 'string' || typeof prompt !== 'string' || label.trim() === '' || prompt.trim() === '') {
       continue
@@ -133,6 +154,7 @@ export function stepsOf(text: string, mode: Mode = DEFAULT_MODE): NextStep[] {
     }
 
     steps.push({
+      kind: kindOf(kind),
       label: label.trim().slice(0, 80),
       prompt: prompt.trim(),
       source: allowed,

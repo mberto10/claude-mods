@@ -3,9 +3,10 @@
 A Claude Code mod that answers "what now?". When Claude finishes an answer, up to three next prompts appear above the prompt box: continuations of what you just did, your open GitHub issues and pull requests, or your Linear issues, depending on the mode. Type a number to send one.
 
 ```text
-Next up (github) · type a number and Enter to send it, or click one to edit it first
-1: Review the release notes PR           #5 · touches the same module
-2: Fix the anchor bug in the parser      #12 · same file as the last change
+Next up (conversation) · type a number and Enter to send it, or click one to edit it first
+continue  1: Handle CRLF in the writer too       same bug, second file
+verify    2: Run the parser tests                checks the fix
+ship      3: Commit and open a pull request      the work is finished
 dismiss
 ```
 
