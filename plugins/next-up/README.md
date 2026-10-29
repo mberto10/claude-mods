@@ -17,8 +17,8 @@ Mods are Claude Code plugins that change the interface itself; this one draws a 
 1. **Install** (Claude Code 2.1.287 or later):
 
    ```text
-   /plugin marketplace add mberto10/applied-systems
-   /plugin install next-up@applied-systems
+   /plugin marketplace add mberto10/claude-mods
+   /plugin install next-up@claude-mods
    ```
 
 2. **Allow Linear** (skip if you only use GitHub). The mod reads Linear in the background, where nobody can be asked, so allow the connector's read-only `list_issues` tool once in `/permissions`. In the terminal it is `mcp__claude_ai_Linear__list_issues`; in the desktop app the connector has an id, and `/next sources` names it.

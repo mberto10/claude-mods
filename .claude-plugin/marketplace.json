@@ -1,0 +1,25 @@
+{
+  "name": "claude-mods",
+  "owner": {"name": "Maximilian Bruhn"},
+  "metadata": {"description": "Mods for Claude Code: plugins that change the interface itself."},
+  "plugins": [
+    {
+      "name": "next-up",
+      "source": "./plugins/next-up",
+      "description": "A Claude Code mod: when a turn ends, suggests up to three next prompts from the conversation and your open GitHub and Linear work.",
+      "version": "0.1.1",
+      "author": {"name": "Maximilian Bruhn"},
+      "category": "productivity",
+      "keywords": ["mod", "next-steps", "github", "linear", "prompts"]
+    },
+    {
+      "name": "linear-tree",
+      "source": "./plugins/linear-tree",
+      "description": "A Claude Code mod: a Linear project as a tree and a flowchart in a side pane, with progress, search, shortcuts and markers on the issues agents are working on.",
+      "version": "0.1.0",
+      "author": {"name": "Maximilian Bruhn"},
+      "category": "productivity",
+      "keywords": ["mod", "linear", "tree", "flowchart", "pane"]
+    }
+  ]
+}

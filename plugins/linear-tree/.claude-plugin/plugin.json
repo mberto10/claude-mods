@@ -5,6 +5,9 @@
   "author": {
     "name": "Maximilian Bruhn"
   },
+  "homepage": "https://github.com/mberto10/claude-mods/tree/main/plugins/linear-tree",
+  "repository": "https://github.com/mberto10/claude-mods",
+  "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
     "defaultProject": {

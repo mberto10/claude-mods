@@ -22,8 +22,8 @@ Mods are Claude Code plugins that change the interface itself. This one opens a 
 1. **Install** (Claude Code 2.1.287 or later):
 
    ```text
-   /plugin marketplace add mberto10/applied-systems
-   /plugin install linear-tree@applied-systems
+   /plugin marketplace add mberto10/claude-mods
+   /plugin install linear-tree@claude-mods
    ```
 
 2. **Allow Linear.** The mod reads Linear in the background, where nobody can be asked, so allow the connector's read-only `list_issues` tool once in `/permissions`, and `list_milestones` for milestone order and dates. In the terminal they are `mcp__claude_ai_Linear__list_issues` and `mcp__claude_ai_Linear__list_milestones`; in the desktop app the connector has an id, and a refused call names it in the pane.
@@ -78,7 +78,7 @@ Per project, across sessions: the view, filter, sort, zoom, folds, milestone and
 
 ## Settings
 
-`/plugin configure linear-tree@applied-systems`:
+`/plugin configure linear-tree@claude-mods`:
 
 | Setting | Default |
 |---|---|
