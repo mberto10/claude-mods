@@ -11,6 +11,7 @@ Fewer moving parts: one source per mode, two settings and no file in your reposi
 - The GitHub items, Items per source and Linear server settings are removed, with fixed defaults: GitHub issues and pull requests, 12 items per source, and the Linear connector found by its `list_issues` tool.
 - New rules for picking steps: no padding to three, nothing when nothing fits the current work, and `conversation` steps that differ from one another.
 - Shorter README, settings and plugin descriptions.
+- Fix: a typed number sends the row the band shows, even when the stored steps changed after it was drawn, and slash commands such as `/next` keep the steps instead of clearing them.
 
 ## 0.1.1 · 2026-10-03
 

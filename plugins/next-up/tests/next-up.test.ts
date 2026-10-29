@@ -42,6 +42,7 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers') {
   const completes: { model: string; prompt: string }[] = []
   const commands: string[] = []
   const toasts: string[] = []
+  const replies: string[] = []
   const store: Record<string, unknown> = {}
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 2, 12) })
 
@@ -83,7 +84,7 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers') {
   on('model.complete', ($, e) => {
     completes.push({ model: e.model, prompt: e.prompt })
 
-    return { value: { isAnswered: true, text: ANSWER, usage: USAGE } }
+    return { value: { isAnswered: true, text: replies.shift() ?? ANSWER, usage: USAGE } }
   })
   on('ui.toast', ($, e) => {
     toasts.push(e.text)
@@ -103,8 +104,10 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers') {
   })
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Text', children: ['(engine band)'] }))
 
-  return { prompts, fills, completes, commands, toasts, clock, writes, linearArgs }
+  return { prompts, fills, completes, commands, toasts, clock, writes, linearArgs, replies }
 }
+
+const continuations = (...labels: string[]) => JSON.stringify(labels.map(label => ({ label, prompt: `${label}, please.`, source: 'continue', ref: null })))
 
 const answered = (answer: string) => ({ answer, durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' as const })
 
@@ -391,5 +394,67 @@ describe('next up', () => {
     await w.clock.advance(20_000)
 
     expect((await sources).text).toContain('Linear: 0 open (no answer within 20s)')
+  })
+
+  test('/next after steps appear reports them and keeps the band', async ($, on) => {
+    const w = world(on)
+    w.replies.push(continuations('Tidy the diff', 'Run the tests'))
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    await $.prompt.submit({ text: '/next', command: { name: 'next', args: '' } })
+    const answer = await $.command.run({ command: 'next', args: '', origin: { kind: 'composer' } })
+
+    expect(answer.text).toBe('Next up: 2 steps above the prompt.')
+
+    const drawn = JSON.stringify(await (await $.ui.mount(BAND)).drawn())
+
+    expect(drawn).toContain('Tidy the diff')
+    expect(drawn).toContain('Run the tests')
+  })
+
+  test('a number picks the row the band drew, even after the stored steps changed', async ($, on) => {
+    const w = world(on)
+    w.replies.push(continuations('A one', 'A two'), continuations('B one', 'B two'))
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    const band = await $.ui.mount(BAND)
+
+    expect(JSON.stringify(await band.drawn())).toContain('A two')
+
+    await band.unmount()
+    await $.command.run({ command: 'next', args: 'refresh', origin: { kind: 'composer' } })
+    await $.prompt.submit({ text: '2' })
+
+    expect(w.prompts.at(-1)).toBe('A two, please.')
+  })
+
+  test('a typed prompt clears the steps, a hidden band picks nothing, and 0 dismisses', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    const band = await $.ui.mount(BAND)
+    await $.prompt.submit({ text: 'Something else.' })
+
+    expect(JSON.stringify(await band.drawn())).not.toContain('Tidy the diff')
+
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+    await band.redraw({ ...BAND.props, isWorking: true })
+    await $.prompt.submit({ text: '1' })
+
+    expect(w.prompts.at(-1)).toBe('1')
+
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+    await band.redraw(BAND.props)
+    await band.press({ key: 'dismiss' })
+
+    expect(JSON.stringify(await band.drawn())).not.toContain('Tidy the diff')
   })
 })

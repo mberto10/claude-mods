@@ -37,6 +37,7 @@ const runtime: {
   linearServer: string | null
   reads: { github: SourceRead; linear: SourceRead } | null
   lastPrompt: string
+  drawn: NextStep[]
   generation: number
   isWarned: boolean
 } = {
@@ -46,6 +47,7 @@ const runtime: {
   linearServer: null,
   reads: null,
   lastPrompt: '',
+  drawn: [],
   generation: 0,
   isWarned: false,
 }
@@ -217,6 +219,7 @@ async function propose($: EngineInterface, answer: string, isFresh: boolean): Pr
 
 async function clear($: EngineInterface): Promise<void> {
   runtime.generation += 1
+  runtime.drawn = []
   await update($, steps, () => [])
   await update($, isThinking, () => false)
 }
@@ -313,15 +316,20 @@ export const register: Register = (on, options) => {
     return result
   })
 
+  /**
+   * A slash command passes through and keeps the steps. Any other typed
+   * prompt clears them; a bare number picks that row of the set the band
+   * last drew, which is what the person sees, not the stored steps.
+   */
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin?.kind === 'plugin') {
+    if (e.origin?.kind === 'plugin' || e.command !== undefined) {
       return next(e)
     }
 
-    const current = await read($, steps)
-    const pick = pickOf(e.text, current.length)
+    const drawn = runtime.drawn
+    const pick = pickOf(e.text, drawn.length)
     await clear($)
-    const text = pick === null ? e.text : current[pick]!.prompt
+    const text = pick === null ? e.text : drawn[pick]!.prompt
     runtime.lastPrompt = text
 
     return text === e.text ? next(e) : next({ ...e, text })
@@ -329,11 +337,14 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || e.props.isWorking) {
+      runtime.drawn = []
+
       return next(e)
     }
 
     const shown = await read($, steps)
     const thinking = await read($, isThinking)
+    runtime.drawn = shown
 
     if (shown.length === 0 && !thinking) {
       return next(e)
