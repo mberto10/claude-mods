@@ -36,7 +36,7 @@ The Mode setting is where each session starts. `/next mode <name>` switches for 
 
 ## How steps are chosen
 
-1. **Only after a finished answer.** Not after a question to you, an interrupted turn or a subagent's turn.
+1. **Only after a finished answer.** Not after a question to you, an interrupted turn, a subagent's turn or an answer under 200 characters, and not while a usage limit window is at 90% or more. The small model is then not called at all.
 2. **The mode's source is read** (not in `conversation` mode). GitHub: open pull requests first, then the newest issues. Linear: your open issues, in the Linear project setting when one is set, started before unstarted before backlog, then by priority. The mod finds the Linear connector by its `list_issues` tool, whatever the app calls it. Results are cached for five minutes; a source that does not answer within 20 seconds is skipped for that turn. The first 12 items go on.
 3. **A small model picks the steps.** Haiku gets your last prompt and Claude's answer, each cut to 750 characters, and the items. It prefers items related to the current work and otherwise keeps the order. In `conversation` mode it writes continuations that differ from one another. Each step carries a short reason.
 4. **Fewer than three, or none, is normal.** The model does not pad the list, and shows nothing when nothing fits.

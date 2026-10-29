@@ -46,6 +46,36 @@ export function asksPerson(answer: string): boolean {
   return /\?\s*$/.test(answer.trim())
 }
 
+/** An answer shorter than this, in characters, gets no steps. */
+export const MIN_ANSWER_CHARS = 200
+
+/** From this share of a rate-limit window on, in percent, the ranker is not called. */
+export const USAGE_LIMIT_PERCENT = 90
+
+/** What `shouldRank` decides from: a finished turn and the session's rate-limit windows. */
+export type RankSignals = {
+  answer: string
+  reason: string
+  isAborted: boolean
+  agentId?: string
+  rateLimits: readonly { percentUsed: number }[]
+}
+
+/**
+ * Whether a finished turn is worth calling the ranker for: a main-loop
+ * answer, not interrupted, not a question to the person, at least
+ * MIN_ANSWER_CHARS long, with every rate-limit window below
+ * USAGE_LIMIT_PERCENT.
+ */
+export function shouldRank(turn: RankSignals): boolean {
+  return turn.agentId === undefined
+    && turn.reason === 'answer'
+    && !turn.isAborted
+    && turn.answer.trim().length >= MIN_ANSWER_CHARS
+    && !asksPerson(turn.answer)
+    && turn.rateLimits.every(window => window.percentUsed < USAGE_LIMIT_PERCENT)
+}
+
 function clipped(text: string, chars: number): string {
   const flat = text.replace(/\s+/g, ' ').trim()
 
