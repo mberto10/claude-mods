@@ -34,7 +34,7 @@ Mods are Claude Code plugins that change the interface itself; this one draws a 
 
 The Mode setting is where each session starts. `/next mode <name>` switches for the current session only. The band's header shows the mode in force.
 
-`conversation` mode is the default because it needs no setup. It overlaps with Claude Code's built-in prompt suggestion, which offers one next prompt in the prompt box; Next up offers up to three, each tagged with its kind, and both can show at once. To turn off Claude Code's, set `"promptSuggestionEnabled": false` in your settings; to turn off Next up, disable the plugin (see [Cost, privacy and turning it off](#cost-privacy-and-turning-it-off)).
+`conversation` mode is the default because it needs no setup, and the fallback to choose when you work without a Linear project or GitHub repository; Next up does not switch to it by itself. It overlaps with Claude Code's built-in prompt suggestion, which offers one next prompt in the prompt box; Next up offers up to three, each tagged with its kind, and both can show at once. To turn off Claude Code's, set `"promptSuggestionEnabled": false` in your settings; to turn off Next up, disable the plugin (see [Cost, privacy and turning it off](#cost-privacy-and-turning-it-off)).
 
 ## How steps are chosen
 
