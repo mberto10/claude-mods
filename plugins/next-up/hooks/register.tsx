@@ -227,9 +227,11 @@ async function clear($: EngineInterface): Promise<void> {
 }
 
 /**
- * The band's `0`. The desktop may also leave the typed `0` in the prompt
- * box, before or after this runs: a box holding only `0` is emptied, and
- * a lone `0` sent right after is dropped. Anything else typed stays.
+ * The band's dismiss Button: clicked, or pressed by its `0` hotkey. When
+ * the hotkey also leaves the `0` in the prompt box, a box holding only
+ * `0` is emptied, and a lone `0` sent right after is dropped. Anything
+ * else typed stays. A `0` that arrives as text without pressing the
+ * Button is handled in `prompt.submit`.
  */
 async function dismiss($: EngineInterface): Promise<void> {
   await clear($)
@@ -336,8 +338,12 @@ export const register: Register = (on, options) => {
   /**
    * A slash command passes through and keeps the steps. Any other typed
    * prompt clears them; a bare number picks that row of the set the band
-   * last drew, which is what the person sees, not the stored steps. A
-   * lone `0` right after a dismiss is the dismiss's digit, and is dropped.
+   * last drew, which is what the person sees, not the stored steps.
+   *
+   * A lone `0` dismisses by either route and is never sent: typed as text
+   * while the band shows steps (the desktop delivers it so), it clears
+   * them; right after the dismiss Button ran, it is that Button's digit.
+   * A `0` with no band drawn passes through.
    */
   on('prompt.submit', async ($, e, next) => {
     if (e.origin?.kind === 'plugin' || e.command !== undefined) {
@@ -347,11 +353,14 @@ export const register: Register = (on, options) => {
     const isDismissed = runtime.isDismissed
     runtime.isDismissed = false
 
-    if (isDismissed && e.text.trim() === '0') {
+    const drawn = runtime.drawn
+
+    if (e.text.trim() === '0' && (isDismissed || drawn.length > 0)) {
+      await clear($)
+
       return { drop: 'Next up: steps dismissed' }
     }
 
-    const drawn = runtime.drawn
     const pick = pickOf(e.text, drawn.length)
     await clear($)
     const text = pick === null ? e.text : drawn[pick]!.prompt

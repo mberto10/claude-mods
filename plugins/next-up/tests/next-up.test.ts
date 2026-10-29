@@ -514,4 +514,18 @@ describe('next up', () => {
 
     expect(w.prompts).toEqual(['0', 'hello', '0'])
   })
+
+  test('0 typed while steps show dismisses them and is not sent', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    const band = await $.ui.mount(BAND)
+    const sent = await $.prompt.submit({ text: ' 0 ' })
+
+    expect(sent.drop).toBe('Next up: steps dismissed')
+    expect(w.prompts).toEqual([])
+    expect(JSON.stringify(await band.drawn())).not.toContain('Tidy the diff')
+  })
 })
