@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 · 2026-10-29
+
+Fewer moving parts: one source per mode, two settings and no file in your repository. If you used 0.1.x:
+
+- `mixed` mode is removed. Pick `linear`, `github` or `conversation`. The default is now `conversation`, which needs no setup.
+- `/next mode <name>` switches for the current session only and writes no file; the Mode setting is where each session starts.
+- The `fork` ranker and the Ranker and Light ranker model settings are removed. A small model (Haiku) always picks the steps from the last exchange and a short list of items.
+- `.claude/next-up.json` and the commands `/next linear …`, `/next github …` and `/next config` are removed. Use the Mode and Linear project settings instead; the file is no longer read and can be deleted.
+- The GitHub items, Items per source and Linear server settings are removed, with fixed defaults: GitHub issues and pull requests, 12 items per source, and the Linear connector found by its `list_issues` tool.
+- New rules for picking steps: no padding to three, nothing when nothing fits the current work, and `conversation` steps that differ from one another.
+- Shorter README, settings and plugin descriptions.
+
 ## 0.1.1 · 2026-10-03
 
 - The suggestions above the prompt now stack with lines other mods draw there instead of hiding them: while Next up is thinking or showing steps, another mod's line stays visible below.

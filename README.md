@@ -6,7 +6,7 @@ Mods for [Claude Code](https://claude.com/claude-code): plugins that change the 
 
 | Mod | What it does | Version |
 |---|---|---|
-| [Next up](plugins/next-up/) | When a turn ends, up to three next prompts above the prompt box, from the conversation, GitHub or Linear, or all of them. | 0.1.1 |
+| [Next up](plugins/next-up/) | When Claude finishes an answer, up to three next prompts above the prompt box, from the conversation, GitHub or Linear, as the mode says. | 0.2.0 |
 | [Linear tree](plugins/linear-tree/) | A Linear project as a tree and a flowchart in a side pane, with progress, search, shortcuts and markers on the issues agents are working on. | 0.1.1 |
 
 ## Install
