@@ -1,7 +1,7 @@
 {
   "name": "next-up",
-  "version": "0.2.0",
-  "description": "When Claude finishes an answer, suggests up to three next prompts: from the conversation, your GitHub issues and pull requests, or your Linear issues.",
+  "version": "0.3.0",
+  "description": "Suggests up to three next prompts from your open Linear issues or GitHub issues and pull requests, after Claude finishes a turn that changed something. With no setup, it suggests continuations of the conversation instead.",
   "author": {
     "name": "Maximilian Bruhn"
   },
