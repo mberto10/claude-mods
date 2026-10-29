@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { NextStep } from '../types'
 import { CONFIG_PATH, configOf, OPEN_STATES, summaryOf, withSetting, type ProjectConfig } from './config'
-import { asksPerson, budgeted, digestOf, modeOf, MODES, pickOf, rankPromptOf, stepsOf, type Mode } from './rank'
+import { asksPerson, budgeted, DEFAULT_MODE, digestOf, modeOf, MODES, pickOf, rankPromptOf, stepsOf, type Mode } from './rank'
 import {
   DEFAULT_LINEAR_SERVERS,
   githubIssuesOf,
@@ -46,7 +46,7 @@ const runtime: {
   root: string | null
 } = {
   settings: {
-    mode: 'mixed',
+    mode: DEFAULT_MODE,
     githubItems: 'issues-and-prs',
     linearServer: '',
     linearProject: '',
@@ -100,6 +100,7 @@ async function projectConfig($: EngineInterface): Promise<ProjectConfig> {
   }
 }
 
+/** The project file's mode, else the plugin setting; a name that is no mode counts as unset. */
 async function modeNow($: EngineInterface): Promise<Mode> {
   const config = await projectConfig($)
 
@@ -234,10 +235,10 @@ async function workItems($: EngineInterface, mode: Mode, isFresh: boolean): Prom
     read: { count: 0, note: error instanceof Error ? error.message.slice(0, 160) : String(error) },
   })
   const [github, linear] = await Promise.all([
-    mode === 'mixed' || mode === 'github'
+    mode === 'github'
       ? within($, readGithub($, config).catch(failed), SOURCE_TIMEOUT_MS, late)
       : off,
-    mode === 'mixed' || mode === 'linear'
+    mode === 'linear'
       ? within($, readLinear($, config).catch(failed), SOURCE_TIMEOUT_MS, late)
       : off,
   ])
@@ -320,7 +321,7 @@ async function saveSetting($: EngineInterface, section: string, key: string, val
   return `Saved to ${CONFIG_PATH}. ${summaryOf(await projectConfig($), await modeNow($))}.`
 }
 
-const HELP = '/next refresh · /next sources · /next config · /next mode <mixed|linear|github|conversation> · '
+const HELP = `/next refresh · /next sources · /next config · /next mode <${MODES.join('|')}> · `
   + '/next linear <project|team|label|states|assignee|query> <value|off> · /next github <items|label|assignee> <value|off>'
 
 async function commandText($: EngineInterface, args: string): Promise<string> {
@@ -373,7 +374,7 @@ async function commandText($: EngineInterface, args: string): Promise<string> {
 export const register: Register = (on, options) => {
   const perSource = Number(options.perSource ?? 12)
   runtime.settings = {
-    mode: modeOf(String(options.mode ?? 'mixed')) ?? 'mixed',
+    mode: modeOf(String(options.mode ?? DEFAULT_MODE)) ?? DEFAULT_MODE,
     githubItems: String(options.githubItems ?? 'issues-and-prs'),
     linearServer: String(options.linearServer ?? ''),
     linearProject: String(options.linearProject ?? ''),

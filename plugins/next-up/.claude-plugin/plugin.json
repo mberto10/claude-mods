@@ -20,11 +20,10 @@
     "mode": {
       "type": "string",
       "title": "Mode",
-      "description": "Where the steps come from: \"mixed\" (default) continues the current work and draws on GitHub and Linear; \"linear\" or \"github\" only suggests that source's open items; \"conversation\" only continues the current work. \"/next mode <name>\" changes it until changed again.",
+      "description": "Where the steps come from: \"conversation\" (default) continues the current work and reads no source; \"linear\" only suggests your open Linear issues; \"github\" only suggests open GitHub issues and pull requests. \"/next mode <name>\" changes it until changed again.",
       "required": false,
-      "default": "mixed",
+      "default": "conversation",
       "options": [
-        "mixed",
         "linear",
         "github",
         "conversation"
