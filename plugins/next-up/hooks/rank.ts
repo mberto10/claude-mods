@@ -52,20 +52,46 @@ export const MIN_ANSWER_CHARS = 200
 /** From this share of a rate-limit window on, in percent, the ranker is not called. */
 export const USAGE_LIMIT_PERCENT = 90
 
-/** What `shouldRank` decides from: a finished turn and the session's rate-limit windows. */
+/** Built-in tools that change something: files, notebooks, or whatever a shell command does. */
+export const CHANGING_TOOLS: readonly string[] = ['Edit', 'Write', 'NotebookEdit', 'Bash']
+
+/** An MCP tool whose name starts with one of these verbs creates or updates something. */
+const CHANGING_MCP_VERB = /^(?:save|create|update|delete|add|edit|write|set)(?:[_-]|[A-Z]|$)/
+
+/**
+ * True for a tool that changes something: one of CHANGING_TOOLS, or an MCP
+ * tool (`mcp__<server>__<tool>`) whose own name starts with a verb such as
+ * save, create or update.
+ */
+export function isChangingTool(tool: string): boolean {
+  if (CHANGING_TOOLS.includes(tool)) {
+    return true
+  }
+
+  const split = tool.lastIndexOf('__')
+
+  return tool.startsWith('mcp__') && split > 'mcp_'.length && CHANGING_MCP_VERB.test(tool.slice(split + 2))
+}
+
+/**
+ * What `shouldRank` decides from: a finished turn, the session's rate-limit
+ * windows, and the names of the tools the turn called on the main loop.
+ */
 export type RankSignals = {
   answer: string
   reason: string
   isAborted: boolean
   agentId?: string
   rateLimits: readonly { percentUsed: number }[]
+  tools: readonly string[]
 }
 
 /**
  * Whether a finished turn is worth calling the ranker for: a main-loop
  * answer, not interrupted, not a question to the person, at least
  * MIN_ANSWER_CHARS long, with every rate-limit window below
- * USAGE_LIMIT_PERCENT.
+ * USAGE_LIMIT_PERCENT, from a turn that called at least one tool that
+ * changes something (isChangingTool).
  */
 export function shouldRank(turn: RankSignals): boolean {
   return turn.agentId === undefined
@@ -74,6 +100,7 @@ export function shouldRank(turn: RankSignals): boolean {
     && turn.answer.trim().length >= MIN_ANSWER_CHARS
     && !asksPerson(turn.answer)
     && turn.rateLimits.every(window => window.percentUsed < USAGE_LIMIT_PERCENT)
+    && turn.tools.some(isChangingTool)
 }
 
 function clipped(text: string, chars: number): string {
