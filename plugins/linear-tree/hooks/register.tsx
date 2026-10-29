@@ -277,14 +277,7 @@ async function load($: EngineInterface, project: string): Promise<void> {
   }
 }
 
-/** The project's top-level folder: the repository's top, else the session's folder. */
-async function rootOf($: EngineInterface): Promise<string> {
-  const git = await $.process.run(['git', 'rev-parse', '--show-toplevel']).catch(() => null)
-
-  return git !== null && git.exitCode === 0 && git.stdout.trim() !== '' ? git.stdout.trim() : $.session.cwd()
-}
-
-/** The project to show: named, else the last shown, else the setting, else Next up's first project. */
+/** The project to show: named, else the last shown, else the setting, else none. */
 async function projectOf($: EngineInterface, named: string): Promise<string | null> {
   if (named !== '') {
     return named
@@ -296,19 +289,7 @@ async function projectOf($: EngineInterface, named: string): Promise<string | nu
     return last
   }
 
-  if (runtime.settings.defaultProject !== '') {
-    return runtime.settings.defaultProject
-  }
-
-  const nextUp = await $.fs.read(`${await rootOf($)}/.claude/next-up.json`).catch(() => null)
-
-  try {
-    const projects = typeof nextUp === 'string' ? JSON.parse(nextUp)?.linear?.projects : null
-
-    return Array.isArray(projects) && typeof projects[0] === 'string' ? projects[0] : null
-  } catch {
-    return null
-  }
+  return runtime.settings.defaultProject !== '' ? runtime.settings.defaultProject : null
 }
 
 async function refreshShown($: EngineInterface): Promise<void> {

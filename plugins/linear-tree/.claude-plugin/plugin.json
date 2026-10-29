@@ -1,6 +1,6 @@
 {
   "name": "linear-tree",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A Claude Code mod: a Linear project as a tree and a flowchart in a side pane, with progress, search, filters, shortcuts and markers on the issues agents are working on.",
   "author": {
     "name": "Maximilian Bruhn"
@@ -13,7 +13,7 @@
     "defaultProject": {
       "type": "string",
       "title": "Default project",
-      "description": "The Linear project /tree shows when none is named and none was shown before. Empty (default): the first project in .claude/next-up.json, if any.",
+      "description": "The Linear project /tree shows when none is named and none was shown before. Empty (default): /tree asks which project to show.",
       "required": false,
       "default": ""
     },

@@ -277,6 +277,23 @@ describe('pane', () => {
     expect(again.text).toBe('Linear tree for Website in the side pane.')
   })
 
+  test('/tree with no name and none shown before asks for a project and reads no file', async ($, on) => {
+    const w = world(on)
+    const reads: string[] = []
+    on('fs.read', ($, e) => {
+      reads.push(e.path)
+
+      return { value: JSON.stringify({ linear: { projects: ['Website'] } }) }
+    })
+    await $.session.start(SESSION)
+    const answer = await $.command.run({ command: 'tree', args: '', origin: { kind: 'composer' } })
+    await w.clock.settle()
+
+    expect(answer.text).toBe('Which Linear project? /tree <project name>')
+    expect(reads).toEqual([])
+    expect(w.opened).toEqual([])
+  })
+
   test('a refused Linear call says which permission is missing', async ($, on) => {
     const w = world(on, 'refuses')
     await $.session.start(SESSION)
