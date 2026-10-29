@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { NextStep } from '../types'
-import { asksPerson, budgeted, DEFAULT_MODE, digestOf, modeOf, MODES, pickOf, rankPromptOf, stepsOf, type Mode } from './rank'
+import { budgeted, DEFAULT_MODE, digestOf, modeOf, MODES, pickOf, rankPromptOf, shouldRank, stepsOf, type Mode } from './rank'
 import {
   DEFAULT_LINEAR_SERVERS,
   githubIssuesOf,
@@ -219,6 +219,15 @@ async function propose($: EngineInterface, answer: string, isFresh: boolean): Pr
   }
 }
 
+/** The session's rate-limit windows; none when the engine cannot say. */
+async function rateLimitsOf($: EngineInterface): Promise<{ percentUsed: number }[]> {
+  try {
+    return (await $.session.usage()).rateLimits
+  } catch {
+    return []
+  }
+}
+
 async function clear($: EngineInterface): Promise<void> {
   runtime.generation += 1
   runtime.drawn = []
@@ -325,7 +334,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
 
-    if (e.agentId === undefined && e.reason === 'answer' && !e.isAborted && !asksPerson(e.answer)) {
+    if (shouldRank({ ...e, rateLimits: await rateLimitsOf($) })) {
       const answer = e.answer
       $.clock.after(0, () => {
         void propose($, answer, false).catch(() => clear($))
