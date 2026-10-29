@@ -1,11 +1,12 @@
 # Next up
 
-A Claude Code mod that answers "what now?". When Claude finishes an answer, up to three next prompts appear above the prompt box: continuations of what you just did, your open GitHub issues and pull requests, or your Linear issues, depending on the mode. Type a number to send one.
+A Claude Code mod that suggests your next prompts from your open Linear issues or your repository's GitHub issues and pull requests, up to three above the prompt box after Claude finishes a turn that changed something. With no setup, in `conversation` mode, the steps are continuations of the current work instead. Type a number to send one.
 
 ```text
-Next up (github) · type a number and Enter to send it, or click one to edit it first
-1: Review the release notes PR           #5 · touches the same module
-2: Fix the anchor bug in the parser      #12 · same file as the last change
+Next up (linear) · type a number and Enter to send it, or click one to edit it first
+verify    1: Run the parser tests                checks the fix
+ship      2: Commit and open a pull request      the work is finished
+issue     3: Start ENG-142: export as CSV        ENG-142 · next in the project
 dismiss
 ```
 
@@ -20,26 +21,29 @@ Mods are Claude Code plugins that change the interface itself; this one draws a 
    /plugin install next-up@claude-mods
    ```
 
-2. **Pick a mode.** It starts in `conversation` mode, which needs no setup. Choose another in the plugin's settings, or try one for the session with `/next mode github`.
+2. **Pick a mode.** It starts in `conversation` mode, which needs no setup. For steps from your open work, choose `linear` or `github` in the plugin's settings, or try one for the session with `/next mode github`.
 3. **Allow Linear** (only for `linear` mode). The mod reads Linear in the background, where nobody can be asked, so allow the connector's read-only `list_issues` tool once in `/permissions`. In the terminal it is `mcp__claude_ai_Linear__list_issues`; in the desktop app the connector has an id, and `/next sources` names it.
 
 ## Modes
 
 | Mode | Steps come from |
 |---|---|
-| `conversation` (default) | Continuations of the current work; no source is read |
-| `github` | The repository's open issues and pull requests, through the `gh` CLI and your login |
 | `linear` | Your open Linear issues, through the Linear connector you already have |
+| `github` | The repository's open issues and pull requests, through the `gh` CLI and your login |
+| `conversation` (default) | Continuations of the current work; no source is read |
 
 The Mode setting is where each session starts. `/next mode <name>` switches for the current session only. The band's header shows the mode in force.
 
+`conversation` mode is the default because it needs no setup, and the fallback to choose when you work without a Linear project or GitHub repository; Next up does not switch to it by itself. It overlaps with Claude Code's built-in prompt suggestion, which offers one next prompt in the prompt box; Next up offers up to three, each tagged with its kind, and both can show at once. To turn off Claude Code's, set `"promptSuggestionEnabled": false` in your settings; to turn off Next up, disable the plugin (see [Cost, privacy and turning it off](#cost-privacy-and-turning-it-off)).
+
 ## How steps are chosen
 
-1. **Only after a finished answer.** Not after a question to you, an interrupted turn or a subagent's turn.
+1. **Only after a turn that changed something.** Steps follow a finished answer from a turn that edited a file, ran a shell command or called an MCP tool that creates or updates something (such as `save_…`, `create_…`, `update_…`). Not after a turn that only read or answered, a question to you, an interrupted turn, a subagent's turn or an answer under 200 characters, and not while a usage limit window is at 90% or more. The small model is then not called at all. `/next refresh` picks steps whatever the last turn did.
 2. **The mode's source is read** (not in `conversation` mode). GitHub: open pull requests first, then the newest issues. Linear: your open issues, in the Linear project setting when one is set, started before unstarted before backlog, then by priority. The mod finds the Linear connector by its `list_issues` tool, whatever the app calls it. Results are cached for five minutes; a source that does not answer within 20 seconds is skipped for that turn. The first 12 items go on.
-3. **A small model picks the steps.** Haiku gets your last prompt and Claude's answer, each cut to 750 characters, and the items. It prefers items related to the current work and otherwise keeps the order. In `conversation` mode it writes continuations that differ from one another. Each step carries a short reason.
+3. **A small model picks the steps.** Haiku gets your last prompt and Claude's answer, each cut to 750 characters, and the items. It prefers items related to the current work and otherwise keeps the order. In `conversation` mode it writes continuations that differ from one another. Each step carries a short reason and a kind, shown as a tag before it: `continue` carries the current work on, `verify` checks it, `ship` commits, pushes or releases it, and `issue` starts a Linear or GitHub item. No two steps share a kind, except that several can be `issue` steps.
 4. **Fewer than three, or none, is normal.** The model does not pad the list, and shows nothing when nothing fits.
 5. **You choose.** Type `1`, `2` or `3` and Enter to send a step as written, or click it to edit it in the prompt box first. `0` dismisses the steps; any other prompt clears them, while a slash command such as `/next` keeps them. While steps are showing, a prompt that is only a step's number sends that step.
+6. **Less often when unused.** After three sets of steps in a row go dismissed or ignored, the mod backs off: it calls the small model only on every third eligible answer. Using a step or running `/next refresh` ends this at once, and `/next sources` says when it is backing off.
 
 ## Commands
 
@@ -48,7 +52,7 @@ The Mode setting is where each session starts. `/next mode <name>` switches for 
 | `/next` | Says how many steps are showing |
 | `/next refresh` | Reads the source again and picks new steps |
 | `/next mode <name>` | Switches the mode for this session |
-| `/next sources` | How many open items each source returned, or why none |
+| `/next sources` | How many open items each source returned, or why none, and how many steps you used, dismissed or ignored |
 
 ## Settings
 
@@ -59,11 +63,11 @@ The Mode setting is where each session starts. `/next mode <name>` switches for 
 
 ## Cost, privacy and turning it off
 
-Each finished answer costs one small model request, roughly 1,000 to 2,000 tokens however long the session is. The suggestions never enter the conversation; Claude's context grows only by the step you send and the one line `/next` prints. Issue titles, states, priorities and ids go to that small model. The mod writes nothing to GitHub, Linear or your repository, and a step runs only when you send it, under your normal permissions.
+Next up makes at most one small model request per finished answer, and none after a turn that the rules above skip. A request costs roughly 1,000 to 2,000 tokens however long the session is. The suggestions never enter the conversation; Claude's context grows only by the step you send and the one line `/next` prints. Issue titles, states, priorities and ids go to that small model. The mod writes nothing to GitHub, Linear or your repository, and a step runs only when you send it, under your normal permissions.
+
+Each set of steps ends as used (you sent one), dismissed (`0` or the dismiss button) or ignored (you sent your own prompt, or new steps replaced it). The mod counts these for the session in memory and for all sessions in its own plugin store, a JSON file under your Claude Code configuration directory. `/next sources` shows both; the counts are never sent anywhere.
 
 To turn the mod off, run `/plugin disable next-up@claude-mods`, or set `"next-up@claude-mods": false` under `enabledPlugins` in your settings.
-
-Claude Code has its own prompt suggestions, which can appear in the prompt box alongside `conversation` mode. Set `"promptSuggestionEnabled": false` in your settings to turn those off.
 
 ## Troubleshooting
 

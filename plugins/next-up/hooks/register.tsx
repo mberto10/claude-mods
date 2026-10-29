@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { NextStep } from '../types'
-import { asksPerson, budgeted, DEFAULT_MODE, digestOf, modeOf, MODES, pickOf, rankPromptOf, stepsOf, type Mode } from './rank'
+import { budgeted, DEFAULT_MODE, digestOf, modeOf, MODES, pickOf, rankPromptOf, shouldRank, stepsOf, type Mode } from './rank'
 import {
   DEFAULT_LINEAR_SERVERS,
   githubIssuesOf,
@@ -12,6 +12,7 @@ import {
   linearServersOf,
   type WorkItem,
 } from './sources'
+import { BACK_OFF_AFTER, BACK_OFF_EVERY, backOffAfter, backOffTurn, isBackingOff, NO_BACK_OFF, type BackOff } from './rank'
 
 const COMMAND = 'next'
 const ITEMS_TTL_MS = 5 * 60 * 1000
@@ -19,11 +20,21 @@ const SOURCE_TIMEOUT_MS = 20_000
 const MODEL_TIMEOUT_MS = 30_000
 const MODEL = 'haiku'
 const PER_SOURCE = 12
+/** The kind tag column: the longest kind, "continue", and two spaces. */
+const TAG_COLUMNS = 10
 
 const steps = atom({ plugin: 'next-up', key: 'steps' } as const, [])
 const isThinking = atom({ plugin: 'next-up', key: 'isThinking' } as const, false)
 
 type SourceRead = { count: number; note: string }
+
+/** How a band that showed steps ended. */
+type Outcome = 'used' | 'dismissed' | 'ignored'
+type Counts = Record<Outcome, number>
+
+/** The key in the plugin's own store that keeps the counts of all sessions. */
+const COUNTS_KEY = 'outcomes'
+const NO_COUNTS: Counts = { used: 0, dismissed: 0, ignored: 0 }
 
 type Settings = {
   mode: Mode
@@ -41,6 +52,13 @@ const runtime: {
   isDismissed: boolean
   generation: number
   isWarned: boolean
+  /** The band whose outcome is open: its steps, and whether one was clicked into the box. */
+  band: { key: string; isClicked: boolean } | null
+  counts: Counts
+  /** The tools the main loop called in the current turn, by name. */
+  turnTools: string[]
+  /** The session's run of unused bands, and whether Next up is backing off from it. */
+  backOff: BackOff
 } = {
   settings: { mode: DEFAULT_MODE, linearProject: '' },
   mode: DEFAULT_MODE,
@@ -52,6 +70,82 @@ const runtime: {
   isDismissed: false,
   generation: 0,
   isWarned: false,
+  band: null,
+  counts: { ...NO_COUNTS },
+  turnTools: [],
+  backOff: NO_BACK_OFF,
+}
+
+function countsOf(value: unknown): Counts {
+  const kept = typeof value === 'object' && value !== null ? value as Partial<Record<Outcome, unknown>> : {}
+  const count = (outcome: Outcome) => {
+    const n = kept[outcome]
+
+    return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : 0
+  }
+
+  return { used: count('used'), dismissed: count('dismissed'), ignored: count('ignored') }
+}
+
+/**
+ * Ends the open band with its one outcome: the only place outcomes are
+ * recorded. Counts this session's in memory and all sessions' in the
+ * plugin's own store; with no band open it does nothing, so no band is
+ * counted twice. A store that fails leaves the session's count standing.
+ */
+async function settle($: EngineInterface, outcome: Outcome): Promise<void> {
+  if (runtime.band === null) {
+    return
+  }
+
+  runtime.band = null
+  runtime.counts = { ...runtime.counts, [outcome]: runtime.counts[outcome] + 1 }
+  runtime.backOff = backOffAfter(runtime.backOff, outcome === 'used')
+
+  try {
+    const kept = countsOf(await $.store.get(COUNTS_KEY))
+    await $.store.set(COUNTS_KEY, { ...kept, [outcome]: kept[outcome] + 1 })
+  } catch {
+    // The session's count stands.
+  }
+}
+
+/**
+ * The band drew `shown`. Steps other than the open band's start a new band,
+ * and the one they replace, unused, counts as ignored.
+ */
+async function opened($: EngineInterface, shown: NextStep[]): Promise<void> {
+  const key = JSON.stringify(shown.map(step => step.prompt))
+
+  if (runtime.band !== null && runtime.band.key === key && !runtime.band.isClicked) {
+    return
+  }
+
+  await settle($, 'ignored')
+  runtime.band = { key, isClicked: false }
+}
+
+const tallyOf = (counts: Counts) => `${counts.used} used · ${counts.dismissed} dismissed · ${counts.ignored} ignored`
+
+async function countsLine($: EngineInterface): Promise<string> {
+  const all = countsOf(await $.store.get(COUNTS_KEY).catch(() => undefined))
+
+  const backingOff = isBackingOff(runtime.backOff)
+    ? ` Backing off after ${BACK_OFF_AFTER} unused in a row: steps once every ${BACK_OFF_EVERY} eligible turns, until one is used or /next refresh.`
+    : ''
+
+  return `Steps this session: ${tallyOf(runtime.counts)}. All sessions: ${tallyOf(all)}.${backingOff}`
+}
+
+/**
+ * Whether an eligible turn calls the ranker, by the back-off rule in
+ * `backOffTurn`. A turn it skips calls no ranker and draws no band.
+ */
+function ranksNow(): boolean {
+  const { isRanked, state } = backOffTurn(runtime.backOff)
+  runtime.backOff = state
+
+  return isRanked
 }
 
 /** Resolves `work`, or `fallback` once `ms` have passed without it. */
@@ -219,6 +313,15 @@ async function propose($: EngineInterface, answer: string, isFresh: boolean): Pr
   }
 }
 
+/** The session's rate-limit windows; none when the engine cannot say. */
+async function rateLimitsOf($: EngineInterface): Promise<{ percentUsed: number }[]> {
+  try {
+    return (await $.session.usage()).rateLimits
+  } catch {
+    return []
+  }
+}
+
 async function clear($: EngineInterface): Promise<void> {
   runtime.generation += 1
   runtime.drawn = []
@@ -234,6 +337,7 @@ async function clear($: EngineInterface): Promise<void> {
  * Button is handled in `prompt.submit`.
  */
 async function dismiss($: EngineInterface): Promise<void> {
+  await settle($, 'dismissed')
   await clear($)
   runtime.isDismissed = true
   const box = await $.prompt.read()
@@ -273,13 +377,15 @@ async function commandText($: EngineInterface, args: string): Promise<string> {
   if (verb === 'sources') {
     await workItems($, runtime.mode, true)
     const reads = runtime.reads
-
-    return reads === null
+    const read = reads === null
       ? 'No sources read yet.'
       : `GitHub: ${reads.github.count} open (${reads.github.note}). Linear: ${reads.linear.count} open (${reads.linear.note}).`
+
+    return `${read}\n${await countsLine($)}`
   }
 
   if (verb === 'refresh') {
+    runtime.backOff = NO_BACK_OFF
     const found = await propose($, '', true)
 
     return `Next up: ${found.length} step${found.length === 1 ? '' : 's'} above the prompt.`
@@ -291,8 +397,8 @@ async function commandText($: EngineInterface, args: string): Promise<string> {
 }
 
 /**
- * Next up. When a main turn ends with an answer (not a question to the
- * person), up to three next prompts appear above the prompt: continuations
+ * Next up. When a main turn that changed something (edited a file, ran a
+ * command) ends with an answer (not a question to the person), up to three next prompts appear above the prompt: continuations
  * of the current work, open GitHub issues and pull requests (gh CLI) or
  * Linear issues (the connected Linear MCP server), as the mode says. Type
  * 1, 2 or 3 and Enter to send one, or click it to edit it first. Nothing
@@ -309,6 +415,9 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     runtime.mode = runtime.settings.mode
     runtime.cache = null
+    runtime.band = null
+    runtime.counts = { ...NO_COUNTS }
+    runtime.backOff = NO_BACK_OFF
     await update($, isThinking, () => false)
     await $.command.register({
       name: COMMAND,
@@ -322,11 +431,45 @@ export const register: Register = (on, options) => {
     return { text: await commandText($, e.args) }
   })
 
+  /**
+   * Records the tools the main loop calls in the current turn, so
+   * `shouldRank` can tell a turn that changed something from one that only
+   * read or answered. A subagent's calls (`agentId` set) and refused calls
+   * do not count.
+   */
+  on('tool.call', async ($, e, next) => {
+    const result = await next(e)
+
+    if (e.agentId === undefined && result.deny === undefined) {
+      runtime.turnTools.push(e.tool)
+    }
+
+    return result
+  })
+
+  on('turn.start', async ($, e, next) => {
+    runtime.turnTools = []
+
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
 
-    if (e.agentId === undefined && e.reason === 'answer' && !e.isAborted && !asksPerson(e.answer)) {
+    if (e.agentId !== undefined) {
+      return result
+    }
+
+    const tools = runtime.turnTools
+    runtime.turnTools = []
+
+    if (shouldRank({ ...e, rateLimits: await rateLimitsOf($), tools })) {
       const answer = e.answer
+
+      if (!ranksNow()) {
+        return result
+      }
+
       $.clock.after(0, () => {
         void propose($, answer, false).catch(() => clear($))
       })
@@ -344,6 +487,10 @@ export const register: Register = (on, options) => {
    * while the band shows steps (the desktop delivers it so), it clears
    * them; right after the dismiss Button ran, it is that Button's digit.
    * A `0` with no band drawn passes through.
+   *
+   * Outcomes: a picked number, or any prompt sent after a step was clicked
+   * into the box, uses the band; a `0` dismisses it; any other prompt
+   * ignores it. A slash command counts as nothing.
    */
   on('prompt.submit', async ($, e, next) => {
     if (e.origin?.kind === 'plugin' || e.command !== undefined) {
@@ -356,12 +503,14 @@ export const register: Register = (on, options) => {
     const drawn = runtime.drawn
 
     if (e.text.trim() === '0' && (isDismissed || drawn.length > 0)) {
+      await settle($, 'dismissed')
       await clear($)
 
       return { drop: 'Next up: steps dismissed' }
     }
 
     const pick = pickOf(e.text, drawn.length)
+    await settle($, pick !== null || runtime.band?.isClicked === true ? 'used' : 'ignored')
     await clear($)
     const text = pick === null ? e.text : drawn[pick]!.prompt
     runtime.lastPrompt = text
@@ -379,6 +528,10 @@ export const register: Register = (on, options) => {
     const shown = await read($, steps)
     const thinking = await read($, isThinking)
     runtime.drawn = shown
+
+    if (shown.length > 0) {
+      await opened($, shown)
+    }
 
     if (shown.length === 0 && !thinking) {
       return next(e)
@@ -400,24 +553,39 @@ export const register: Register = (on, options) => {
 
     runtime.isDismissed = false
 
+    // The kind tags form a muted column ahead of the rows when any step has
+    // one; a row without a kind keeps the column blank. A tagged row drops
+    // the source word after its label, since the tag already says "continue".
+    const isTagged = shown.some(step => step.kind !== null)
+    const labelWidth = isTagged ? Math.max(20, width - TAG_COLUMNS) : width
+
     return (
       <Box flexDirection="column">
         <Text dimColor>{`Next up (${mode}) · type a number and Enter to send it, or click one to edit it first`}</Text>
-        {shown.map((step, index) => (
-          <Box key={`row-${index}`}>
-            <Button
-              key={`step-${index}`}
-              plain
-              hotkey={String(index + 1)}
-              label={step.label.length > width ? `${step.label.slice(0, width - 1)}…` : step.label}
-              onPress={async () => {
-                await $.prompt.fill({ text: step.prompt, mode: 'replace' })
-                await clear($)
-              }}
-            />
-            <Text dimColor>{`  ${step.ref ?? step.source}${step.why !== null ? ` · ${step.why}` : ''}`}</Text>
-          </Box>
-        ))}
+        {shown.map((step, index) => {
+          const trail = [step.ref ?? (step.kind === null ? step.source : null), step.why].filter(part => part !== null).join(' · ')
+
+          return (
+            <Box key={`row-${index}`}>
+              {isTagged ? <Text dimColor>{(step.kind ?? '').padEnd(TAG_COLUMNS)}</Text> : null}
+              <Button
+                key={`step-${index}`}
+                plain
+                hotkey={String(index + 1)}
+                label={step.label.length > labelWidth ? `${step.label.slice(0, labelWidth - 1)}…` : step.label}
+                onPress={async () => {
+                  if (runtime.band !== null) {
+                    runtime.band.isClicked = true
+                  }
+
+                  await $.prompt.fill({ text: step.prompt, mode: 'replace' })
+                  await clear($)
+                }}
+              />
+              {trail !== '' ? <Text dimColor>{`  ${trail}`}</Text> : null}
+            </Box>
+          )
+        })}
         <Button key="dismiss" plain hotkey="0" label="dismiss" onPress={() => dismiss($)} />
         {beneath}
       </Box>

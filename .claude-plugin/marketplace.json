@@ -6,8 +6,8 @@
     {
       "name": "next-up",
       "source": "./plugins/next-up",
-      "description": "A Claude Code mod: when Claude finishes an answer, suggests up to three next prompts from the conversation, your GitHub issues and pull requests, or your Linear issues.",
-      "version": "0.2.0",
+      "description": "A Claude Code mod: suggests up to three next prompts from your open Linear issues or GitHub issues and pull requests, after a turn that changed something; with no setup, continuations of the conversation.",
+      "version": "0.3.0",
       "author": {"name": "Maximilian Bruhn"},
       "category": "productivity",
       "keywords": ["mod", "next-steps", "github", "linear", "prompts"]

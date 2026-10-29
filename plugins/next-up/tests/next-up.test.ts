@@ -1,7 +1,27 @@
 import type { On, SessionStartInput } from 'claude-code'
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
-import { asksPerson, budgeted, digestOf, MODES, modeOf, pickOf, rankPromptOf, stepsOf } from '../hooks/rank'
+import {
+  asksPerson,
+  BACK_OFF_AFTER,
+  BACK_OFF_EVERY,
+  backOffAfter,
+  backOffTurn,
+  budgeted,
+  digestOf,
+  isChangingTool,
+  isBackingOff,
+  KINDS,
+  MIN_ANSWER_CHARS,
+  MODES,
+  modeOf,
+  NO_BACK_OFF,
+  pickOf,
+  rankPromptOf,
+  shouldRank,
+  stepsOf,
+} from '../hooks/rank'
 import { githubIssuesOf, linearIssuesOf, linearServersOf, type WorkItem } from '../hooks/sources'
 
 tier('user')
@@ -93,6 +113,10 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers') {
     return { value: undefined }
   })
   on('turn.complete', ($, e) => ({ text: e.answer }))
+
+  for (const tool of TEST_TOOLS) {
+    on('tool.call', { tool }, () => ({ result: 'ok', text: 'ok' }) as never)
+  }
   on('prompt.submit', ($, e) => {
     prompts.push(e.text)
 
@@ -112,7 +136,34 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers') {
 
 const continuations = (...labels: string[]) => JSON.stringify(labels.map(label => ({ label, prompt: `${label}, please.`, source: 'continue', ref: null })))
 
-const answered = (answer: string) => ({ answer, durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' as const })
+/** A turn whose answer is exactly `answer`. */
+const turnOf = (answer: string) => ({ answer, durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' as const })
+
+/** The body of a normal-length answer: long enough that the ranker is called. */
+const BODY = 'I changed the parser so that anchors handle CRLF line endings, added a test for each of the three cases, ran the whole suite again, and checked that the diff stays small enough to review in one sitting. '
+
+/** A finished answer of normal length that ends with `ending`. */
+const answered = (ending: string) => turnOf(`${BODY}${ending}`)
+
+/** The tools a test's turns may call; the world answers each with "ok". */
+const TEST_TOOLS = ['Edit', 'Bash', 'Read', 'Grep', 'Glob', 'WebFetch'] as const
+
+/**
+ * A main-loop turn that called `tools`, `Edit` unless a test says
+ * otherwise, then finished as `turn`: a turn that changed something.
+ */
+async function finish($: Engine, turn: ReturnType<typeof turnOf>, tools: readonly string[] = ['Edit']) {
+  for (const tool of tools) {
+    await $.tool.call({ tool } as never)
+  }
+
+  return $.turn.complete(turn)
+}
+
+/** The engine's usage op, answering with one rate-limit window at `percentUsed`. */
+function usageAt(on: On, percentUsed: number) {
+  on('session.usage', () => ({ value: { context: { window: 200_000 }, rateLimits: [{ kind: 'five_hour', percentUsed }] } }))
+}
 
 describe('parsing', () => {
   test('closed Linear issues are left out; open ones rank by state, then priority', async () => {
@@ -203,7 +254,7 @@ describe('next up', () => {
     const w = world(on)
     await $.session.start(SESSION)
     await $.prompt.submit({ text: 'Fix the anchors.' })
-    await $.turn.complete(answered('Done: the anchors handle CRLF now.'))
+    await finish($, answered('Done: the anchors handle CRLF now.'))
     await w.clock.settle()
 
     expect(w.commands).toEqual([])
@@ -227,7 +278,7 @@ describe('next up', () => {
   test('github: Linear is not read and only GitHub steps show', { options: { mode: 'github' } }, async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     expect(w.linearArgs).toEqual([])
@@ -246,7 +297,7 @@ describe('next up', () => {
   test('a configured mixed mode falls back to conversation', { options: { mode: 'mixed' } }, async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     expect(w.commands).toEqual([])
@@ -263,7 +314,7 @@ describe('next up', () => {
     expect(refused.text).toBe('Next up mode: conversation. Modes: linear, github, conversation.')
     expect(w.writes).toEqual([])
 
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     expect(w.commands).toEqual([])
@@ -280,7 +331,7 @@ describe('next up', () => {
     expect(changed.text).toBe('Next up mode: linear, for this session.')
     expect(w.writes).toEqual([])
 
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     expect(w.commands).toEqual([])
@@ -303,7 +354,7 @@ describe('next up', () => {
 
     for (const mode of MODES) {
       await $.command.run({ command: 'next', args: `mode ${mode}`, origin: { kind: 'composer' } })
-      await $.turn.complete(answered('Done.'))
+      await finish($, answered('Done.'))
       await w.clock.settle()
 
       expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).toContain(`Next up (${mode}) · type a number`)
@@ -334,7 +385,7 @@ describe('next up', () => {
   test('pressing a step fills the prompt box instead of sending', { options: { mode: 'github' } }, async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     await (await $.ui.mount(BAND)).press({ key: 'step-0' })
@@ -345,7 +396,7 @@ describe('next up', () => {
   test('a turn that ends with a question proposes nothing', async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Should I also add Linear?'))
+    await finish($, answered('Should I also add Linear?'))
     await w.clock.settle()
 
     expect(w.completes).toEqual([])
@@ -403,7 +454,7 @@ describe('next up', () => {
     const w = world(on)
     w.replies.push(continuations('Tidy the diff', 'Run the tests'))
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     await $.prompt.submit({ text: '/next', command: { name: 'next', args: '' } })
@@ -421,7 +472,7 @@ describe('next up', () => {
     const w = world(on)
     w.replies.push(continuations('A one', 'A two'), continuations('B one', 'B two'))
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     const band = await $.ui.mount(BAND)
@@ -438,7 +489,7 @@ describe('next up', () => {
   test('a typed prompt clears the steps, a hidden band picks nothing, and 0 dismisses', async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     const band = await $.ui.mount(BAND)
@@ -446,14 +497,14 @@ describe('next up', () => {
 
     expect(JSON.stringify(await band.drawn())).not.toContain('Tidy the diff')
 
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
     await band.redraw({ ...BAND.props, isWorking: true })
     await $.prompt.submit({ text: '1' })
 
     expect(w.prompts.at(-1)).toBe('1')
 
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
     await band.redraw(BAND.props)
     await band.press({ key: 'dismiss' })
@@ -464,7 +515,7 @@ describe('next up', () => {
   test('0 after dismiss is not sent', async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     await (await $.ui.mount(BAND)).press({ key: 'dismiss' })
@@ -477,7 +528,7 @@ describe('next up', () => {
   test('dismiss leaves a typed draft alone', async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     w.box.text = 'hello'
@@ -490,7 +541,7 @@ describe('next up', () => {
   test('dismiss clears a lone 0 from the box', async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     w.box.text = '0'
@@ -506,7 +557,7 @@ describe('next up', () => {
 
     expect(w.prompts).toEqual(['0'])
 
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
     await (await $.ui.mount(BAND)).press({ key: 'dismiss' })
     await $.prompt.submit({ text: 'hello' })
@@ -518,7 +569,7 @@ describe('next up', () => {
   test('0 typed while steps show dismisses them and is not sent', async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
+    await finish($, answered('Done.'))
     await w.clock.settle()
 
     const band = await $.ui.mount(BAND)
@@ -527,5 +578,543 @@ describe('next up', () => {
     expect(sent.drop).toBe('Next up: steps dismissed')
     expect(w.prompts).toEqual([])
     expect(JSON.stringify(await band.drawn())).not.toContain('Tidy the diff')
+  })
+})
+
+describe('step outcomes', () => {
+  const sources = ($: Engine) => $.command.run({ command: 'next', args: 'sources', origin: { kind: 'composer' } })
+  const countsLine = async ($: Engine) => (await sources($)).text?.split('\n').at(-1)
+  const tally = (used: number, dismissed: number, ignored: number) => `${used} used · ${dismissed} dismissed · ${ignored} ignored`
+  const counts = (session: string, all = session) => `Steps this session: ${session}. All sessions: ${all}.`
+
+  /** A finished answer, and the band mounted showing its steps. */
+  async function shown($: Engine, w: ReturnType<typeof world>) {
+    await finish($, answered('Done.'))
+    await w.clock.settle()
+    const band = await $.ui.mount(BAND)
+    await band.drawn()
+
+    return band
+  }
+
+  test('a number key counts as used', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await shown($, w)
+    await $.prompt.submit({ text: '1' })
+
+    expect(w.prompts.at(-1)).toBe('Tidy up the diff you just made.')
+    expect(await countsLine($)).toBe(counts(tally(1, 0, 0)))
+  })
+
+  test('a click then send counts as used, once', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    const band = await shown($, w)
+    await band.press({ key: 'step-0' })
+    await $.prompt.submit({ text: w.box.text })
+
+    expect(w.prompts.at(-1)).toBe('Tidy up the diff you just made.')
+    expect(await countsLine($)).toBe(counts(tally(1, 0, 0)))
+  })
+
+  test('a typed 0 counts as dismissed', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await shown($, w)
+    await $.prompt.submit({ text: '0' })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 1, 0)))
+  })
+
+  test('the dismiss button counts as dismissed, and its 0 sent after it adds nothing', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    const band = await shown($, w)
+    await band.press({ key: 'dismiss' })
+    await $.prompt.submit({ text: '0' })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 1, 0)))
+  })
+
+  test('an own prompt counts as ignored', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await shown($, w)
+    await $.prompt.submit({ text: 'Something else.' })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 0, 1)))
+  })
+
+  test('a band replaced by a new one counts as ignored; the new one has its own outcome', async ($, on) => {
+    const w = world(on)
+    w.replies.push(continuations('A one', 'A two'), continuations('B one', 'B two'))
+    await $.session.start(SESSION)
+    const band = await shown($, w)
+    await $.command.run({ command: 'next', args: 'refresh', origin: { kind: 'composer' } })
+
+    expect(JSON.stringify(await band.drawn())).toContain('B two')
+
+    await $.prompt.submit({ text: '2' })
+
+    expect(w.prompts.at(-1)).toBe('B two, please.')
+    expect(await countsLine($)).toBe(counts(tally(1, 0, 1)))
+  })
+
+  test('a slash command while steps show counts as nothing and keeps the band', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    const band = await shown($, w)
+    await $.prompt.submit({ text: '/next', command: { name: 'next', args: '' } })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 0, 0)))
+    expect(JSON.stringify(await band.drawn())).toContain('Tidy the diff')
+
+    await $.prompt.submit({ text: 'Something else.' })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 0, 1)))
+  })
+
+  test('/next sources prints the counts line; totals last across sessions, session counts start at zero', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+
+    expect((await sources($)).text).toBe(`GitHub: 0 open (off in this mode). Linear: 0 open (off in this mode).\n${counts(tally(0, 0, 0))}`)
+
+    await shown($, w)
+    await $.prompt.submit({ text: '1' })
+    await $.session.start(SESSION)
+
+    expect(await countsLine($)).toBe(counts(tally(0, 0, 0), tally(1, 0, 0)))
+
+    await shown($, w)
+    await $.prompt.submit({ text: 'Something else.' })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 0, 1), tally(1, 0, 1)))
+  })
+})
+
+describe('when the ranker runs', () => {
+  test('shouldRank: one place decides, from the turn and the usage windows', async () => {
+    const normal = { ...answered('Done.'), rateLimits: [], tools: ['Edit'] }
+
+    expect(BODY.length).toBeGreaterThanOrEqual(MIN_ANSWER_CHARS)
+    expect(shouldRank(normal)).toBe(true)
+    expect(shouldRank({ ...normal, rateLimits: [{ kind: 'five_hour', percentUsed: 89.9 }] })).toBe(true)
+    expect(shouldRank({ ...turnOf('Done.'), rateLimits: [], tools: ['Edit'] })).toBe(false)
+    expect(shouldRank({ ...turnOf('x'.repeat(MIN_ANSWER_CHARS - 1)), rateLimits: [], tools: ['Edit'] })).toBe(false)
+    expect(shouldRank({ ...turnOf('x'.repeat(MIN_ANSWER_CHARS)), rateLimits: [], tools: ['Edit'] })).toBe(true)
+    expect(shouldRank({ ...normal, rateLimits: [{ kind: 'five_hour', percentUsed: 12 }, { kind: 'seven_day', percentUsed: 90 }] })).toBe(false)
+    expect(shouldRank({ ...normal, agentId: 'a1' })).toBe(false)
+    expect(shouldRank({ ...normal, reason: 'error' })).toBe(false)
+    expect(shouldRank({ ...normal, reason: 'aborted', isAborted: true })).toBe(false)
+    expect(shouldRank({ ...answered('Should I also add tests?'), rateLimits: [], tools: ['Edit'] })).toBe(false)
+  })
+
+  test('a short answer calls no ranker and draws no band', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.turn.complete(turnOf('Done.'))
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+
+    const drawn = JSON.stringify(await (await $.ui.mount(BAND)).drawn())
+
+    expect(drawn).not.toContain('Next up')
+    expect(drawn).toContain('(engine band)')
+  })
+
+  test('a usage window at 90% calls no ranker and draws no band', async ($, on) => {
+    const w = world(on)
+    usageAt(on, 90)
+    await $.session.start(SESSION)
+    await finish($, answered('Done.'))
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+
+    const drawn = JSON.stringify(await (await $.ui.mount(BAND)).drawn())
+
+    expect(drawn).not.toContain('Next up')
+    expect(drawn).toContain('(engine band)')
+  })
+
+  test('a normal answer under the usage limit still reaches the ranker', async ($, on) => {
+    const w = world(on)
+    usageAt(on, 40)
+    await $.session.start(SESSION)
+    await finish($, answered('Done.'))
+    await w.clock.settle()
+
+    expect(w.completes).toHaveLength(1)
+    expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).toContain('Next up (conversation) · type a number')
+  })
+})
+
+describe('backing off', () => {
+  const countsLine = async ($: Engine) => (await $.command.run({ command: 'next', args: 'sources', origin: { kind: 'composer' } })).text?.split('\n').at(-1)
+  const BACKING_OFF = 'Backing off after 3 unused in a row: steps once every 3 eligible turns, until one is used or /next refresh.'
+
+  /**
+   * One eligible turn: `text` sent (the person's own prompt by default),
+   * a normal answer, and the band mounted. Says whether the band drew
+   * steps and how many ranker calls there have been so far.
+   */
+  async function turn($: Engine, w: ReturnType<typeof world>, text = 'Something else.') {
+    await $.prompt.submit({ text })
+    await finish($, answered('Done.'))
+    await w.clock.settle()
+    const band = await $.ui.mount(BAND)
+    const isDrawn = JSON.stringify(await band.drawn()).includes('Next up (')
+    await band.unmount()
+
+    return [isDrawn, w.completes.length] as const
+  }
+
+  /** Three bands drawn and left unused; the third is ignored by the next prompt sent. */
+  async function threeUnused($: Engine, w: ReturnType<typeof world>) {
+    expect(await turn($, w)).toEqual([true, 1])
+    expect(await turn($, w)).toEqual([true, 2])
+    expect(await turn($, w)).toEqual([true, 3])
+  }
+
+  test('the rule: a run of three unused bands backs off to every third eligible turn; a used one ends it', async () => {
+    expect([BACK_OFF_AFTER, BACK_OFF_EVERY]).toEqual([3, 3])
+
+    let state = NO_BACK_OFF
+
+    for (const isUsed of [false, false]) {
+      state = backOffAfter(state, isUsed)
+    }
+
+    expect(isBackingOff(state)).toBe(false)
+    expect(isBackingOff(backOffAfter(backOffAfter(state, true), false))).toBe(false)
+
+    state = backOffAfter(state, false)
+
+    expect(isBackingOff(state)).toBe(true)
+
+    const ranked: boolean[] = []
+
+    for (let i = 0; i < 6; i++) {
+      const next = backOffTurn(state)
+      ranked.push(next.isRanked)
+      state = next.state
+    }
+
+    expect(ranked).toEqual([false, false, true, false, false, true])
+    expect(backOffAfter(state, true)).toEqual(NO_BACK_OFF)
+    expect(backOffTurn(NO_BACK_OFF)).toEqual({ isRanked: true, state: NO_BACK_OFF })
+  })
+
+  test('after 3 unused bands, the next two eligible turns call no ranker and draw no band, and the third does', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await threeUnused($, w)
+
+    expect(await turn($, w)).toEqual([false, 3])
+    expect(await turn($, w)).toEqual([false, 3])
+    expect(await turn($, w)).toEqual([true, 4])
+  })
+
+  test('dismissed bands count toward the run like ignored ones', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    expect(await turn($, w)).toEqual([true, 1])
+    expect((await $.prompt.submit({ text: '0' })).drop).toBe('Next up: steps dismissed')
+    expect(await turn($, w)).toEqual([true, 2])
+    expect(await turn($, w)).toEqual([true, 3])
+
+    expect(await turn($, w)).toEqual([false, 3])
+  })
+
+  test('using a step resets the run, and the next eligible turn ranks', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await threeUnused($, w)
+    expect(await turn($, w)).toEqual([false, 3])
+    expect(await turn($, w)).toEqual([false, 3])
+    expect(await turn($, w)).toEqual([true, 4])
+
+    expect(await turn($, w, '1')).toEqual([true, 5])
+    expect(w.prompts.at(-1)).toBe('Tidy up the diff you just made.')
+    expect(await countsLine($)).not.toContain('Backing off')
+    expect(await turn($, w)).toEqual([true, 6])
+  })
+
+  test('/next refresh ranks while backing off and ends it', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await threeUnused($, w)
+    expect(await turn($, w)).toEqual([false, 3])
+
+    const answer = await $.command.run({ command: 'next', args: 'refresh', origin: { kind: 'composer' } })
+
+    expect(w.completes).toHaveLength(4)
+    expect(answer.text).toBe('Next up: 1 step above the prompt.')
+    expect(await countsLine($)).not.toContain('Backing off')
+    expect(await turn($, w)).toEqual([true, 5])
+  })
+
+  test('/next sources says when Next up is backing off, on the counts line', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await threeUnused($, w)
+
+    expect(await countsLine($)).toBe('Steps this session: 0 used · 0 dismissed · 2 ignored. All sessions: 0 used · 0 dismissed · 2 ignored.')
+
+    await $.prompt.submit({ text: 'Something else.' })
+
+    expect(await countsLine($)).toBe(`Steps this session: 0 used · 0 dismissed · 3 ignored. All sessions: 0 used · 0 dismissed · 3 ignored. ${BACKING_OFF}`)
+
+    await $.session.start(SESSION)
+
+    expect(await countsLine($)).not.toContain('Backing off')
+  })
+})
+
+type Drawn = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
+
+type Row = { tag: string | null; isTagMuted: boolean; label: string; trail: string }
+
+/** The band's step rows: the Text before each step Button (its tag), the Button's label and the Text after it. */
+function rowsOf(tree: unknown): Row[] {
+  const textOf = (node: Drawn | undefined) => (node?.children ?? []).filter(child => typeof child === 'string').join('').trim()
+  const rows: Row[] = []
+  const visit = (node: unknown) => {
+    if (typeof node !== 'object' || node === null) {
+      return
+    }
+
+    const children = ((node as Drawn).children ?? []) as Drawn[]
+    const at = children.findIndex(child => child?.type === 'Button' && String(child.props?.key ?? '').startsWith('step-'))
+
+    if (at === -1) {
+      children.forEach(visit)
+
+      return
+    }
+
+    const before = at > 0 ? children[at - 1] : undefined
+    rows.push({
+      tag: before === undefined ? null : textOf(before),
+      isTagMuted: before === undefined || before.props?.dimColor === true,
+      label: String(children[at]!.props?.label ?? ''),
+      trail: textOf(children[at + 1]),
+    })
+  }
+  visit(tree)
+
+  return rows
+}
+
+const KINDED = JSON.stringify([
+  { kind: 'continue', label: 'Handle CRLF in the writer too', prompt: 'Handle CRLF in the writer too.', source: 'continue', ref: null, why: 'same bug, second file' },
+  { kind: 'verify', label: 'Run the parser tests', prompt: 'Run the parser tests.', source: 'continue', ref: null, why: 'checks the fix' },
+  { kind: 'deploy', label: 'Push it live', prompt: 'Push it live.', source: 'continue', ref: null, why: 'work is finished' },
+])
+
+describe('step kinds', () => {
+  test('stepsOf parses kind and drops a missing or unknown kind to no label', async () => {
+    const answer = JSON.stringify([
+      { kind: 'continue', label: 'A', prompt: 'a', source: 'continue', ref: null },
+      { kind: ' Verify ', label: 'B', prompt: 'b', source: 'continue', ref: null },
+      { kind: 'deploy', label: 'C', prompt: 'c', source: 'continue', ref: null },
+    ])
+    const more = JSON.stringify([
+      { label: 'D', prompt: 'd', source: 'continue', ref: null },
+      { kind: 3, label: 'E', prompt: 'e', source: 'continue', ref: null },
+      { kind: 'ship', label: 'F', prompt: 'f', source: 'continue', ref: null },
+    ])
+
+    expect([...KINDS]).toEqual(['continue', 'verify', 'ship', 'issue'])
+    expect(stepsOf(answer, 'conversation').map(step => [step.label, step.kind])).toEqual([['A', 'continue'], ['B', 'verify'], ['C', null]])
+    expect(stepsOf(more, 'conversation').map(step => [step.label, step.kind])).toEqual([['D', null], ['E', null], ['F', 'ship']])
+    expect(stepsOf(JSON.stringify([{ kind: 'issue', label: 'G', prompt: 'g', source: 'linear', ref: 'ENG-42' }]), 'linear')[0]?.kind).toBe('issue')
+  })
+
+  test('the ranker prompt names the kind set and the one-per-kind rule, with issue exempt in linear and github', async () => {
+    const digest = digestOf('Fix it.', 'Done.')
+
+    for (const mode of MODES) {
+      const prompt = rankPromptOf([], mode, digest)
+
+      for (const kind of KINDS) {
+        expect(prompt).toContain(`${kind} (`)
+      }
+
+      expect(prompt).toContain('No two steps share a kind')
+      expect(prompt).toContain('"kind": "<continue, verify, ship or issue>"')
+    }
+
+    expect(rankPromptOf([], 'linear', digest)).toContain('except issue: several steps may be issue steps')
+    expect(rankPromptOf([], 'github', digest)).toContain('except issue: several steps may be issue steps')
+    expect(rankPromptOf([], 'conversation', digest)).not.toContain('except issue')
+  })
+
+  test('the band draws a muted tag before each labelled row and shows the kind once', async ($, on) => {
+    const w = world(on)
+    w.replies.push(KINDED)
+    await $.session.start(SESSION)
+    await finish($, answered('Done.'))
+    await w.clock.settle()
+
+    const band = await $.ui.mount(BAND)
+    const tree: unknown = await band.drawn()
+    const rows = rowsOf(tree)
+
+    expect(rows.map(row => row.tag)).toEqual(['continue', 'verify', ''])
+    expect(rows.every(row => row.isTagMuted)).toBe(true)
+    expect(rows.map(row => row.label)).toEqual(['Handle CRLF in the writer too', 'Run the parser tests', 'Push it live'])
+    expect(rows.map(row => row.trail)).toEqual(['same bug, second file', 'checks the fix', 'continue · work is finished'])
+    expect(JSON.stringify(tree).match(/continue/g)).toHaveLength(2)
+
+    await band.press({ key: 'step-1' })
+
+    expect(w.fills).toEqual(['Run the parser tests.'])
+  })
+
+  test('a band with no kinds draws no tag, and its numbers still pick', async ($, on) => {
+    const w = world(on)
+    w.replies.push(continuations('Tidy the diff', 'Run the tests'))
+    await $.session.start(SESSION)
+    await finish($, answered('Done.'))
+    await w.clock.settle()
+
+    const rows = rowsOf(await (await $.ui.mount(BAND)).drawn())
+
+    expect(rows.map(row => [row.tag, row.label, row.trail])).toEqual([[null, 'Tidy the diff', 'continue'], [null, 'Run the tests', 'continue']])
+
+    await $.prompt.submit({ text: '2' })
+
+    expect(w.prompts.at(-1)).toBe('Run the tests, please.')
+  })
+})
+
+describe('only after turns that changed something', () => {
+  test('shouldRank: a turn with no changing tool is not ranked', async () => {
+    const normal = { ...answered('Done.'), rateLimits: [] }
+
+    expect(shouldRank({ ...normal, tools: [] })).toBe(false)
+    expect(shouldRank({ ...normal, tools: ['Read', 'Grep', 'Glob', 'WebFetch', 'mcp__claude_ai_Linear__list_issues'] })).toBe(false)
+
+    for (const tool of ['Edit', 'Write', 'NotebookEdit', 'Bash', 'mcp__claude_ai_Linear__save_issue']) {
+      expect(shouldRank({ ...normal, tools: ['Read', tool] })).toBe(true)
+    }
+  })
+
+  test('changing tools: Edit, Write, NotebookEdit, Bash, and MCP tools named for creating or updating', async () => {
+    for (const tool of ['Edit', 'Write', 'NotebookEdit', 'Bash', 'mcp__9cae8a51__save_issue', 'mcp__github__create_pull_request', 'mcp__claude_ai_Linear__update_issue', 'mcp__docs__update']) {
+      expect(isChangingTool(tool)).toBe(true)
+    }
+
+    for (const tool of ['Read', 'Grep', 'Glob', 'WebFetch', 'Agent', 'mcp__9cae8a51__list_issues', 'mcp__github__get_issue', 'mcp__x__updated_items', 'mcp__create__list_items', 'mcp__save']) {
+      expect(isChangingTool(tool)).toBe(false)
+    }
+  })
+
+  test('a turn that used only read tools calls no ranker and draws no band', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await finish($, answered('Done.'), ['Read', 'Grep', 'Glob', 'WebFetch'])
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+
+    const drawn = JSON.stringify(await (await $.ui.mount(BAND)).drawn())
+
+    expect(drawn).not.toContain('Next up')
+    expect(drawn).toContain('(engine band)')
+  })
+
+  test('a turn that used no tool calls no ranker and draws no band', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+    expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).not.toContain('Next up')
+  })
+
+  test('a turn that used Edit or Bash reaches the ranker as before', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+
+    for (const tool of ['Edit', 'Bash']) {
+      await finish($, answered('Done.'), ['Read', tool])
+      await w.clock.settle()
+
+      expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).toContain('Next up (conversation) · type a number')
+    }
+
+    expect(w.completes).toHaveLength(2)
+  })
+
+  test("a subagent's Edit and Bash do not count toward the main turn", async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.tool.call({ tool: 'Edit', agentId: 'a1' } as never)
+    await $.tool.call({ tool: 'Bash', agentId: 'a1' } as never)
+    await finish($, answered('Done.'), ['Read'])
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+    expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).not.toContain('Next up')
+  })
+
+  test("a subagent's turn ending leaves the main turn's record alone", async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.tool.call({ tool: 'Edit' } as never)
+    await $.turn.complete({ ...answered('Done.'), turnId: 'sub', agentId: 'a1' })
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    expect(w.completes).toHaveLength(1)
+  })
+
+  test("the record resets with each turn: an earlier turn's Edit does not carry over", async ($, on) => {
+    const w = world(on)
+    on('turn.start', ($, e) => ({ turnId: e.turnId }))
+    await $.session.start(SESSION)
+    await finish($, turnOf('Done.'))
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+
+    await $.tool.call({ tool: 'Edit' } as never)
+    await $.turn.start({ text: 'And now?', turnId: 't2' })
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+  })
+
+  test('a refused Write does not count', async ($, on) => {
+    const w = world(on)
+    on('tool.call', { tool: 'Write' }, () => ({ deny: 'not allowed' }))
+    await $.session.start(SESSION)
+    await finish($, answered('Done.'), ['Write'])
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+  })
+
+  test('/next refresh after a read-only turn still shows steps', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await finish($, answered('Done.'), ['Read'])
+    await w.clock.settle()
+
+    expect(w.completes).toEqual([])
+
+    const answer = await $.command.run({ command: 'next', args: 'refresh', origin: { kind: 'composer' } })
+
+    expect(answer.text).toBe('Next up: 1 step above the prompt.')
+    expect(w.completes).toHaveLength(1)
+    expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).toContain('Tidy the diff')
   })
 })
