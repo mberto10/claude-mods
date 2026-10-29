@@ -1,7 +1,7 @@
 import type { On, SessionStartInput } from 'claude-code'
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
 
-import { asksPerson, budgeted, MODES, modeOf, pickOf, rankPromptOf, stepsOf } from '../hooks/rank'
+import { asksPerson, budgeted, digestOf, MODES, modeOf, pickOf, rankPromptOf, stepsOf } from '../hooks/rank'
 import { githubIssuesOf, linearIssuesOf, linearServersOf, type WorkItem } from '../hooks/sources'
 
 tier('user')
@@ -25,7 +25,6 @@ const ANSWER = JSON.stringify([
   { label: 'Review the onboarding copy', prompt: 'Review the onboarding copy for ENG-42.', source: 'linear', ref: 'ENG-42' },
   { label: 'Tidy the diff', prompt: 'Tidy up the diff you just made.', source: 'continue', ref: null },
 ])
-const CONFIG = '/work/.claude/next-up.json'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
 const BAND = {
@@ -35,13 +34,12 @@ const BAND = {
   props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} },
 } as const
 
-function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers', initialFiles: Record<string, string> = {}) {
-  const files: Record<string, string> = { ...initialFiles }
+function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers') {
+  const writes: string[] = []
   const linearArgs: Record<string, unknown>[] = []
   const prompts: string[] = []
   const fills: string[] = []
   const completes: { model: string; prompt: string }[] = []
-  const forks: string[] = []
   const commands: string[] = []
   const toasts: string[] = []
   const store: Record<string, unknown> = {}
@@ -56,17 +54,12 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers', init
     return { value: undefined }
   })
   on('process.run', ($, e) => {
-    if (e.argv[0] === 'git') {
-      return { value: { exitCode: 0, stdout: '/work\n', stderr: '' } }
-    }
-
     commands.push(e.argv.slice(0, 3).join(' '))
 
     return { value: { exitCode: 0, stdout: e.argv[1] === 'issue' ? GH_ISSUES : GH_PULLS, stderr: '' } }
   })
-  on('fs.read', ($, e) => (files[e.path] === undefined ? { deny: `ENOENT: ${e.path}` } : { value: files[e.path] }))
   on('fs.write', ($, e) => {
-    files[e.path] = e.text
+    writes.push(e.path)
 
     return { value: undefined }
   })
@@ -92,11 +85,6 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers', init
 
     return { value: { isAnswered: true, text: ANSWER, usage: USAGE } }
   })
-  on('model.fork', ($, e) => {
-    forks.push(e.prompt)
-
-    return { value: { isAnswered: false, reason: 'api-error', status: 400, error: 'invalid_request_error', usage: USAGE } }
-  })
   on('ui.toast', ($, e) => {
     toasts.push(e.text)
 
@@ -115,7 +103,7 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers', init
   })
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Text', children: ['(engine band)'] }))
 
-  return { prompts, fills, completes, forks, commands, toasts, clock, files, linearArgs }
+  return { prompts, fills, completes, commands, toasts, clock, writes, linearArgs }
 }
 
 const answered = (answer: string) => ({ answer, durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' as const })
@@ -165,10 +153,25 @@ describe('parsing', () => {
 
   test('a Linear-only prompt lists only Linear items', async () => {
     const items = [...githubIssuesOf(GH_ISSUES), ...linearIssuesOf(LINEAR)]
-    const prompt = rankPromptOf(items, 'linear', null)
+    const prompt = rankPromptOf(items, 'linear', digestOf('Fix it.', 'Done.'))
 
     expect(prompt).toContain('linear ENG-42')
     expect(prompt).not.toContain('github #12')
+  })
+
+  test('the prompt allows no steps, never pads to three, and keeps continuations apart', async () => {
+    const digest = digestOf('Fix it.', 'Done.')
+
+    for (const mode of MODES) {
+      const prompt = rankPromptOf([], mode, digest)
+
+      expect(prompt).toContain('When no step clearly fits the current work, answer []')
+      expect(prompt).toContain('Never pad to three; fewer steps are fine')
+    }
+
+    expect(rankPromptOf([], 'conversation', digest)).toContain('Make the steps clearly different from one another')
+    expect(rankPromptOf([], 'linear', digest)).not.toContain('clearly different')
+    expect(stepsOf('[]', 'conversation')).toEqual([])
   })
 
   test('the Linear server is found by its tool, whatever the connector is called', async () => {
@@ -199,7 +202,6 @@ describe('next up', () => {
 
     expect(w.commands).toEqual([])
     expect(w.linearArgs).toEqual([])
-    expect(w.forks).toEqual([])
     expect(w.completes[0]?.model).toBe('haiku')
     expect(w.completes[0]?.prompt).toContain('The person asked: Fix the anchors.')
     expect(w.completes[0]?.prompt).not.toContain('Open work items')
@@ -223,6 +225,7 @@ describe('next up', () => {
     await w.clock.settle()
 
     expect(w.linearArgs).toEqual([])
+    expect(w.commands).toEqual(['gh issue list', 'gh pr list'])
     expect(w.completes[0]?.prompt).toContain('github #12: Fix CRLF anchors [issue, bug]')
     expect(w.completes[0]?.prompt).toContain('github #5: Add release notes')
 
@@ -245,30 +248,31 @@ describe('next up', () => {
     expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).toContain('Next up (conversation)')
   })
 
-  test('a stored mixed mode falls back to conversation, and /next mode mixed is not saved', async ($, on) => {
-    const w = world(on, 'answers', { [CONFIG]: '{ "mode": "mixed" }' })
+  test('/next mode mixed changes nothing and names the current mode and the valid ones', async ($, on) => {
+    const w = world(on)
     await $.session.start(SESSION)
+
+    const refused = await $.command.run({ command: 'next', args: 'mode mixed', origin: { kind: 'composer' } })
+
+    expect(refused.text).toBe('Next up mode: conversation. Modes: linear, github, conversation.')
+    expect(w.writes).toEqual([])
+
     await $.turn.complete(answered('Done.'))
     await w.clock.settle()
 
     expect(w.commands).toEqual([])
     expect(w.linearArgs).toEqual([])
     expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).toContain('Next up (conversation)')
-
-    const refused = await $.command.run({ command: 'next', args: 'mode mixed', origin: { kind: 'composer' } })
-
-    expect(refused.text).toBe('Next up mode: conversation. Modes: linear, github, conversation.')
-    expect(w.files[CONFIG]).toBe('{ "mode": "mixed" }')
   })
 
-  test('/next mode linear: GitHub is not read and only Linear steps show', async ($, on) => {
+  test('/next mode linear switches the session without writing a file: only Linear steps show', async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
 
     const changed = await $.command.run({ command: 'next', args: 'mode linear', origin: { kind: 'composer' } })
 
-    expect(changed.text).toContain('Saved to .claude/next-up.json')
-    expect(JSON.parse(w.files[CONFIG]!).mode).toBe('linear')
+    expect(changed.text).toBe('Next up mode: linear, for this session.')
+    expect(w.writes).toEqual([])
 
     await $.turn.complete(answered('Done.'))
     await w.clock.settle()
@@ -280,16 +284,29 @@ describe('next up', () => {
     expect(drawn).toContain('Next up (linear)')
     expect(drawn).toContain('ENG-42')
     expect(drawn).not.toContain('#12')
+
+    const shown = await $.command.run({ command: 'next', args: 'mode', origin: { kind: 'composer' } })
+
+    expect(shown.text).toBe('Next up mode: linear. Modes: linear, github, conversation.')
+    expect(w.writes).toEqual([])
   })
 
-  test('the fork ranker falls back to the light one when it does not answer', { options: { ranker: 'fork' } }, async ($, on) => {
+  test('the light ranker answers in all three modes, with haiku', async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.turn.complete(answered('Done.'))
-    await w.clock.settle()
 
-    expect(w.forks).toHaveLength(1)
-    expect(w.completes).toHaveLength(1)
+    for (const mode of MODES) {
+      await $.command.run({ command: 'next', args: `mode ${mode}`, origin: { kind: 'composer' } })
+      await $.turn.complete(answered('Done.'))
+      await w.clock.settle()
+
+      expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).toContain(`Next up (${mode}) · type a number`)
+    }
+
+    expect(w.completes.map(one => one.model)).toEqual(['haiku', 'haiku', 'haiku'])
+    expect(w.completes[0]?.prompt).toContain('linear ENG-42')
+    expect(w.completes[1]?.prompt).toContain('github #12')
+    expect(w.completes[2]?.prompt).not.toContain('Open work items')
   })
 
   test('a refused Linear call is reported once, with the tool to allow', { options: { mode: 'linear' } }, async ($, on) => {
@@ -332,33 +349,28 @@ describe('next up', () => {
     expect(w.prompts).toEqual(['1'])
   })
 
-  test('/next linear project and states go into the project file and into the Linear call', { options: { mode: 'linear' } }, async ($, on) => {
+  test('the Linear project setting goes into the one Linear call', { options: { mode: 'linear', linearProject: 'Website' } }, async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    await $.command.run({ command: 'next', args: 'linear project Website, Docs', origin: { kind: 'composer' } })
-    const saved = await $.command.run({ command: 'next', args: 'linear states started,unstarted', origin: { kind: 'composer' } })
+    const sources = await $.command.run({ command: 'next', args: 'sources', origin: { kind: 'composer' } })
 
-    expect(saved.text).toContain('projects Website, Docs')
-    expect(saved.text).toContain('states started, unstarted')
-    expect(JSON.parse(w.files[CONFIG]!)).toEqual({ linear: { projects: ['Website', 'Docs'], states: ['started', 'unstarted'] } })
-
-    await $.command.run({ command: 'next', args: 'sources', origin: { kind: 'composer' } })
-
-    expect(w.linearArgs.map(args => args.project)).toEqual(['Website', 'Docs'])
+    expect(sources.text).toContain('Linear: 1 open (claude.ai Linear)')
+    expect(w.linearArgs).toHaveLength(1)
+    expect(w.linearArgs[0]?.project).toBe('Website')
     expect(w.linearArgs[0]?.assignee).toBe('me')
-
-    const cleared = await $.command.run({ command: 'next', args: 'linear project off', origin: { kind: 'composer' } })
-
-    expect(cleared.text).toContain('Linear: all projects')
   })
 
-  test('an unknown setting is explained, not saved', async ($, on) => {
+  test('/next linear, /next github and /next config are gone from the command and its help', async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
-    const answer = await $.command.run({ command: 'next', args: 'linear colour blue', origin: { kind: 'composer' } })
 
-    expect(answer.text).toContain('Unknown linear setting "colour"')
-    expect(w.files[CONFIG]).toBeUndefined()
+    for (const args of ['linear project Website', 'github items issues', 'config']) {
+      const answer = await $.command.run({ command: 'next', args, origin: { kind: 'composer' } })
+
+      expect(answer.text).toBe('Next up: no steps yet. /next refresh · /next sources · /next mode <linear|github|conversation>')
+    }
+
+    expect(w.writes).toEqual([])
   })
 
   test('a desktop connector named by an id is found and read as the tool the model sees', { options: { mode: 'linear' } }, async ($, on) => {
