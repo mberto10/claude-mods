@@ -48,7 +48,7 @@ The Mode setting is where each session starts. `/next mode <name>` switches for 
 | `/next` | Says how many steps are showing |
 | `/next refresh` | Reads the source again and picks new steps |
 | `/next mode <name>` | Switches the mode for this session |
-| `/next sources` | How many open items each source returned, or why none |
+| `/next sources` | How many open items each source returned, or why none, and how many steps you used, dismissed or ignored |
 
 ## Settings
 
@@ -60,6 +60,8 @@ The Mode setting is where each session starts. `/next mode <name>` switches for 
 ## Cost, privacy and turning it off
 
 Each finished answer costs one small model request, roughly 1,000 to 2,000 tokens however long the session is. The suggestions never enter the conversation; Claude's context grows only by the step you send and the one line `/next` prints. Issue titles, states, priorities and ids go to that small model. The mod writes nothing to GitHub, Linear or your repository, and a step runs only when you send it, under your normal permissions.
+
+Each set of steps ends as used (you sent one), dismissed (`0` or the dismiss button) or ignored (you sent your own prompt, or new steps replaced it). The mod counts these for the session in memory and for all sessions in its own plugin store, a JSON file under your Claude Code configuration directory. `/next sources` shows both; the counts are never sent anywhere.
 
 To turn the mod off, run `/plugin disable next-up@claude-mods`, or set `"next-up@claude-mods": false` under `enabledPlugins` in your settings.
 

@@ -1,5 +1,6 @@
 import type { On, SessionStartInput } from 'claude-code'
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
 import { asksPerson, budgeted, digestOf, MIN_ANSWER_CHARS, MODES, modeOf, pickOf, rankPromptOf, shouldRank, stepsOf } from '../hooks/rank'
 import { githubIssuesOf, linearIssuesOf, linearServersOf, type WorkItem } from '../hooks/sources'
@@ -539,6 +540,119 @@ describe('next up', () => {
     expect(sent.drop).toBe('Next up: steps dismissed')
     expect(w.prompts).toEqual([])
     expect(JSON.stringify(await band.drawn())).not.toContain('Tidy the diff')
+  })
+})
+
+describe('step outcomes', () => {
+  const sources = ($: Engine) => $.command.run({ command: 'next', args: 'sources', origin: { kind: 'composer' } })
+  const countsLine = async ($: Engine) => (await sources($)).text?.split('\n').at(-1)
+  const tally = (used: number, dismissed: number, ignored: number) => `${used} used · ${dismissed} dismissed · ${ignored} ignored`
+  const counts = (session: string, all = session) => `Steps this session: ${session}. All sessions: ${all}.`
+
+  /** A finished answer, and the band mounted showing its steps. */
+  async function shown($: Engine, w: ReturnType<typeof world>) {
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+    const band = await $.ui.mount(BAND)
+    await band.drawn()
+
+    return band
+  }
+
+  test('a number key counts as used', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await shown($, w)
+    await $.prompt.submit({ text: '1' })
+
+    expect(w.prompts.at(-1)).toBe('Tidy up the diff you just made.')
+    expect(await countsLine($)).toBe(counts(tally(1, 0, 0)))
+  })
+
+  test('a click then send counts as used, once', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    const band = await shown($, w)
+    await band.press({ key: 'step-0' })
+    await $.prompt.submit({ text: w.box.text })
+
+    expect(w.prompts.at(-1)).toBe('Tidy up the diff you just made.')
+    expect(await countsLine($)).toBe(counts(tally(1, 0, 0)))
+  })
+
+  test('a typed 0 counts as dismissed', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await shown($, w)
+    await $.prompt.submit({ text: '0' })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 1, 0)))
+  })
+
+  test('the dismiss button counts as dismissed, and its 0 sent after it adds nothing', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    const band = await shown($, w)
+    await band.press({ key: 'dismiss' })
+    await $.prompt.submit({ text: '0' })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 1, 0)))
+  })
+
+  test('an own prompt counts as ignored', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await shown($, w)
+    await $.prompt.submit({ text: 'Something else.' })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 0, 1)))
+  })
+
+  test('a band replaced by a new one counts as ignored; the new one has its own outcome', async ($, on) => {
+    const w = world(on)
+    w.replies.push(continuations('A one', 'A two'), continuations('B one', 'B two'))
+    await $.session.start(SESSION)
+    const band = await shown($, w)
+    await $.command.run({ command: 'next', args: 'refresh', origin: { kind: 'composer' } })
+
+    expect(JSON.stringify(await band.drawn())).toContain('B two')
+
+    await $.prompt.submit({ text: '2' })
+
+    expect(w.prompts.at(-1)).toBe('B two, please.')
+    expect(await countsLine($)).toBe(counts(tally(1, 0, 1)))
+  })
+
+  test('a slash command while steps show counts as nothing and keeps the band', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    const band = await shown($, w)
+    await $.prompt.submit({ text: '/next', command: { name: 'next', args: '' } })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 0, 0)))
+    expect(JSON.stringify(await band.drawn())).toContain('Tidy the diff')
+
+    await $.prompt.submit({ text: 'Something else.' })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 0, 1)))
+  })
+
+  test('/next sources prints the counts line; totals last across sessions, session counts start at zero', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+
+    expect((await sources($)).text).toBe(`GitHub: 0 open (off in this mode). Linear: 0 open (off in this mode).\n${counts(tally(0, 0, 0))}`)
+
+    await shown($, w)
+    await $.prompt.submit({ text: '1' })
+    await $.session.start(SESSION)
+
+    expect(await countsLine($)).toBe(counts(tally(0, 0, 0), tally(1, 0, 0)))
+
+    await shown($, w)
+    await $.prompt.submit({ text: 'Something else.' })
+
+    expect(await countsLine($)).toBe(counts(tally(0, 0, 1), tally(1, 0, 1)))
   })
 })
 

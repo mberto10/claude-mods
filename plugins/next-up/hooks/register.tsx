@@ -25,6 +25,14 @@ const isThinking = atom({ plugin: 'next-up', key: 'isThinking' } as const, false
 
 type SourceRead = { count: number; note: string }
 
+/** How a band that showed steps ended. */
+type Outcome = 'used' | 'dismissed' | 'ignored'
+type Counts = Record<Outcome, number>
+
+/** The key in the plugin's own store that keeps the counts of all sessions. */
+const COUNTS_KEY = 'outcomes'
+const NO_COUNTS: Counts = { used: 0, dismissed: 0, ignored: 0 }
+
 type Settings = {
   mode: Mode
   linearProject: string
@@ -41,6 +49,9 @@ const runtime: {
   isDismissed: boolean
   generation: number
   isWarned: boolean
+  /** The band whose outcome is open: its steps, and whether one was clicked into the box. */
+  band: { key: string; isClicked: boolean } | null
+  counts: Counts
 } = {
   settings: { mode: DEFAULT_MODE, linearProject: '' },
   mode: DEFAULT_MODE,
@@ -52,6 +63,64 @@ const runtime: {
   isDismissed: false,
   generation: 0,
   isWarned: false,
+  band: null,
+  counts: { ...NO_COUNTS },
+}
+
+function countsOf(value: unknown): Counts {
+  const kept = typeof value === 'object' && value !== null ? value as Partial<Record<Outcome, unknown>> : {}
+  const count = (outcome: Outcome) => {
+    const n = kept[outcome]
+
+    return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : 0
+  }
+
+  return { used: count('used'), dismissed: count('dismissed'), ignored: count('ignored') }
+}
+
+/**
+ * Ends the open band with its one outcome: the only place outcomes are
+ * recorded. Counts this session's in memory and all sessions' in the
+ * plugin's own store; with no band open it does nothing, so no band is
+ * counted twice. A store that fails leaves the session's count standing.
+ */
+async function settle($: EngineInterface, outcome: Outcome): Promise<void> {
+  if (runtime.band === null) {
+    return
+  }
+
+  runtime.band = null
+  runtime.counts = { ...runtime.counts, [outcome]: runtime.counts[outcome] + 1 }
+
+  try {
+    const kept = countsOf(await $.store.get(COUNTS_KEY))
+    await $.store.set(COUNTS_KEY, { ...kept, [outcome]: kept[outcome] + 1 })
+  } catch {
+    // The session's count stands.
+  }
+}
+
+/**
+ * The band drew `shown`. Steps other than the open band's start a new band,
+ * and the one they replace, unused, counts as ignored.
+ */
+async function opened($: EngineInterface, shown: NextStep[]): Promise<void> {
+  const key = JSON.stringify(shown.map(step => step.prompt))
+
+  if (runtime.band !== null && runtime.band.key === key && !runtime.band.isClicked) {
+    return
+  }
+
+  await settle($, 'ignored')
+  runtime.band = { key, isClicked: false }
+}
+
+const tallyOf = (counts: Counts) => `${counts.used} used · ${counts.dismissed} dismissed · ${counts.ignored} ignored`
+
+async function countsLine($: EngineInterface): Promise<string> {
+  const all = countsOf(await $.store.get(COUNTS_KEY).catch(() => undefined))
+
+  return `Steps this session: ${tallyOf(runtime.counts)}. All sessions: ${tallyOf(all)}.`
 }
 
 /** Resolves `work`, or `fallback` once `ms` have passed without it. */
@@ -243,6 +312,7 @@ async function clear($: EngineInterface): Promise<void> {
  * Button is handled in `prompt.submit`.
  */
 async function dismiss($: EngineInterface): Promise<void> {
+  await settle($, 'dismissed')
   await clear($)
   runtime.isDismissed = true
   const box = await $.prompt.read()
@@ -282,10 +352,11 @@ async function commandText($: EngineInterface, args: string): Promise<string> {
   if (verb === 'sources') {
     await workItems($, runtime.mode, true)
     const reads = runtime.reads
-
-    return reads === null
+    const read = reads === null
       ? 'No sources read yet.'
       : `GitHub: ${reads.github.count} open (${reads.github.note}). Linear: ${reads.linear.count} open (${reads.linear.note}).`
+
+    return `${read}\n${await countsLine($)}`
   }
 
   if (verb === 'refresh') {
@@ -318,6 +389,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     runtime.mode = runtime.settings.mode
     runtime.cache = null
+    runtime.band = null
+    runtime.counts = { ...NO_COUNTS }
     await update($, isThinking, () => false)
     await $.command.register({
       name: COMMAND,
@@ -353,6 +426,10 @@ export const register: Register = (on, options) => {
    * while the band shows steps (the desktop delivers it so), it clears
    * them; right after the dismiss Button ran, it is that Button's digit.
    * A `0` with no band drawn passes through.
+   *
+   * Outcomes: a picked number, or any prompt sent after a step was clicked
+   * into the box, uses the band; a `0` dismisses it; any other prompt
+   * ignores it. A slash command counts as nothing.
    */
   on('prompt.submit', async ($, e, next) => {
     if (e.origin?.kind === 'plugin' || e.command !== undefined) {
@@ -365,12 +442,14 @@ export const register: Register = (on, options) => {
     const drawn = runtime.drawn
 
     if (e.text.trim() === '0' && (isDismissed || drawn.length > 0)) {
+      await settle($, 'dismissed')
       await clear($)
 
       return { drop: 'Next up: steps dismissed' }
     }
 
     const pick = pickOf(e.text, drawn.length)
+    await settle($, pick !== null || runtime.band?.isClicked === true ? 'used' : 'ignored')
     await clear($)
     const text = pick === null ? e.text : drawn[pick]!.prompt
     runtime.lastPrompt = text
@@ -388,6 +467,10 @@ export const register: Register = (on, options) => {
     const shown = await read($, steps)
     const thinking = await read($, isThinking)
     runtime.drawn = shown
+
+    if (shown.length > 0) {
+      await opened($, shown)
+    }
 
     if (shown.length === 0 && !thinking) {
       return next(e)
@@ -420,6 +503,10 @@ export const register: Register = (on, options) => {
               hotkey={String(index + 1)}
               label={step.label.length > width ? `${step.label.slice(0, width - 1)}…` : step.label}
               onPress={async () => {
+                if (runtime.band !== null) {
+                  runtime.band.isClicked = true
+                }
+
                 await $.prompt.fill({ text: step.prompt, mode: 'replace' })
                 await clear($)
               }}
