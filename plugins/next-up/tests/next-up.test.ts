@@ -43,6 +43,7 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers') {
   const commands: string[] = []
   const toasts: string[] = []
   const replies: string[] = []
+  const box = { text: '' }
   const store: Record<string, unknown> = {}
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 2, 12) })
 
@@ -97,14 +98,16 @@ function world(on: On, linear: 'answers' | 'refuses' | 'hangs' = 'answers') {
 
     return { text: e.text }
   })
+  on('prompt.read', () => ({ value: { text: box.text, cursor: box.text.length } }))
   on('prompt.fill', ($, e) => {
     fills.push(e.text)
+    box.text = e.text
 
     return { isFilled: true }
   })
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Text', children: ['(engine band)'] }))
 
-  return { prompts, fills, completes, commands, toasts, clock, writes, linearArgs, replies }
+  return { prompts, fills, completes, commands, toasts, clock, writes, linearArgs, replies, box }
 }
 
 const continuations = (...labels: string[]) => JSON.stringify(labels.map(label => ({ label, prompt: `${label}, please.`, source: 'continue', ref: null })))
@@ -456,5 +459,59 @@ describe('next up', () => {
     await band.press({ key: 'dismiss' })
 
     expect(JSON.stringify(await band.drawn())).not.toContain('Tidy the diff')
+  })
+
+  test('0 after dismiss is not sent', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    await (await $.ui.mount(BAND)).press({ key: 'dismiss' })
+    const sent = await $.prompt.submit({ text: '0' })
+
+    expect(sent.drop).toBe('Next up: steps dismissed')
+    expect(w.prompts).toEqual([])
+  })
+
+  test('dismiss leaves a typed draft alone', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    w.box.text = 'hello'
+    await (await $.ui.mount(BAND)).press({ key: 'dismiss' })
+
+    expect(w.fills).toEqual([])
+    expect(w.box.text).toBe('hello')
+  })
+
+  test('dismiss clears a lone 0 from the box', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+
+    w.box.text = '0'
+    await (await $.ui.mount(BAND)).press({ key: 'dismiss' })
+
+    expect(w.fills).toEqual([''])
+  })
+
+  test('a 0 with no band shown passes through, as does one after the next prompt', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await $.prompt.submit({ text: '0' })
+
+    expect(w.prompts).toEqual(['0'])
+
+    await $.turn.complete(answered('Done.'))
+    await w.clock.settle()
+    await (await $.ui.mount(BAND)).press({ key: 'dismiss' })
+    await $.prompt.submit({ text: 'hello' })
+    await $.prompt.submit({ text: '0' })
+
+    expect(w.prompts).toEqual(['0', 'hello', '0'])
   })
 })

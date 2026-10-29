@@ -12,6 +12,7 @@ Fewer moving parts: one source per mode, two settings and no file in your reposi
 - New rules for picking steps: no padding to three, nothing when nothing fits the current work, and `conversation` steps that differ from one another.
 - Shorter README, settings and plugin descriptions.
 - Fix: a typed number sends the row the band shows, even when the stored steps changed after it was drawn, and slash commands such as `/next` keep the steps instead of clearing them.
+- Fix: in the desktop app, typing `0` and Enter to dismiss the steps no longer sends a `0` to Claude; a draft you typed stays in the box when you click dismiss.
 
 ## 0.1.1 · 2026-10-03
 
