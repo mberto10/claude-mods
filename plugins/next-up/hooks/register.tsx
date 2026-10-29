@@ -54,6 +54,8 @@ const runtime: {
   /** The band whose outcome is open: its steps, and whether one was clicked into the box. */
   band: { key: string; isClicked: boolean } | null
   counts: Counts
+  /** The tools the main loop called in the current turn, by name. */
+  turnTools: string[]
 } = {
   settings: { mode: DEFAULT_MODE, linearProject: '' },
   mode: DEFAULT_MODE,
@@ -67,6 +69,7 @@ const runtime: {
   isWarned: false,
   band: null,
   counts: { ...NO_COUNTS },
+  turnTools: [],
 }
 
 function countsOf(value: unknown): Counts {
@@ -373,8 +376,8 @@ async function commandText($: EngineInterface, args: string): Promise<string> {
 }
 
 /**
- * Next up. When a main turn ends with an answer (not a question to the
- * person), up to three next prompts appear above the prompt: continuations
+ * Next up. When a main turn that changed something (edited a file, ran a
+ * command) ends with an answer (not a question to the person), up to three next prompts appear above the prompt: continuations
  * of the current work, open GitHub issues and pull requests (gh CLI) or
  * Linear issues (the connected Linear MCP server), as the mode says. Type
  * 1, 2 or 3 and Enter to send one, or click it to edit it first. Nothing
@@ -406,10 +409,39 @@ export const register: Register = (on, options) => {
     return { text: await commandText($, e.args) }
   })
 
+  /**
+   * Records the tools the main loop calls in the current turn, so
+   * `shouldRank` can tell a turn that changed something from one that only
+   * read or answered. A subagent's calls (`agentId` set) and refused calls
+   * do not count.
+   */
+  on('tool.call', async ($, e, next) => {
+    const result = await next(e)
+
+    if (e.agentId === undefined && result.deny === undefined) {
+      runtime.turnTools.push(e.tool)
+    }
+
+    return result
+  })
+
+  on('turn.start', async ($, e, next) => {
+    runtime.turnTools = []
+
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
 
-    if (shouldRank({ ...e, rateLimits: await rateLimitsOf($) })) {
+    if (e.agentId !== undefined) {
+      return result
+    }
+
+    const tools = runtime.turnTools
+    runtime.turnTools = []
+
+    if (shouldRank({ ...e, rateLimits: await rateLimitsOf($), tools })) {
       const answer = e.answer
       $.clock.after(0, () => {
         void propose($, answer, false).catch(() => clear($))
