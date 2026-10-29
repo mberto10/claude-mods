@@ -41,6 +41,7 @@ The Mode setting is where each session starts. `/next mode <name>` switches for 
 3. **A small model picks the steps.** Haiku gets your last prompt and Claude's answer, each cut to 750 characters, and the items. It prefers items related to the current work and otherwise keeps the order. In `conversation` mode it writes continuations that differ from one another. Each step carries a short reason.
 4. **Fewer than three, or none, is normal.** The model does not pad the list, and shows nothing when nothing fits.
 5. **You choose.** Type `1`, `2` or `3` and Enter to send a step as written, or click it to edit it in the prompt box first. `0` dismisses the steps; any other prompt clears them, while a slash command such as `/next` keeps them. While steps are showing, a prompt that is only a step's number sends that step.
+6. **Less often when unused.** After three sets of steps in a row go dismissed or ignored, the mod backs off: it calls the small model only on every third eligible answer. Using a step or running `/next refresh` ends this at once, and `/next sources` says when it is backing off.
 
 ## Commands
 

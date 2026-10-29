@@ -2,7 +2,26 @@ import type { On, SessionStartInput } from 'claude-code'
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { asksPerson, budgeted, digestOf, isChangingTool, KINDS, MIN_ANSWER_CHARS, MODES, modeOf, pickOf, rankPromptOf, shouldRank, stepsOf } from '../hooks/rank'
+import {
+  asksPerson,
+  BACK_OFF_AFTER,
+  BACK_OFF_EVERY,
+  backOffAfter,
+  backOffTurn,
+  budgeted,
+  digestOf,
+  isChangingTool,
+  isBackingOff,
+  KINDS,
+  MIN_ANSWER_CHARS,
+  MODES,
+  modeOf,
+  NO_BACK_OFF,
+  pickOf,
+  rankPromptOf,
+  shouldRank,
+  stepsOf,
+} from '../hooks/rank'
 import { githubIssuesOf, linearIssuesOf, linearServersOf, type WorkItem } from '../hooks/sources'
 
 tier('user')
@@ -730,6 +749,128 @@ describe('when the ranker runs', () => {
 
     expect(w.completes).toHaveLength(1)
     expect(JSON.stringify(await (await $.ui.mount(BAND)).drawn())).toContain('Next up (conversation) · type a number')
+  })
+})
+
+describe('backing off', () => {
+  const countsLine = async ($: Engine) => (await $.command.run({ command: 'next', args: 'sources', origin: { kind: 'composer' } })).text?.split('\n').at(-1)
+  const BACKING_OFF = 'Backing off after 3 unused in a row: steps once every 3 eligible turns, until one is used or /next refresh.'
+
+  /**
+   * One eligible turn: `text` sent (the person's own prompt by default),
+   * a normal answer, and the band mounted. Says whether the band drew
+   * steps and how many ranker calls there have been so far.
+   */
+  async function turn($: Engine, w: ReturnType<typeof world>, text = 'Something else.') {
+    await $.prompt.submit({ text })
+    await finish($, answered('Done.'))
+    await w.clock.settle()
+    const band = await $.ui.mount(BAND)
+    const isDrawn = JSON.stringify(await band.drawn()).includes('Next up (')
+    await band.unmount()
+
+    return [isDrawn, w.completes.length] as const
+  }
+
+  /** Three bands drawn and left unused; the third is ignored by the next prompt sent. */
+  async function threeUnused($: Engine, w: ReturnType<typeof world>) {
+    expect(await turn($, w)).toEqual([true, 1])
+    expect(await turn($, w)).toEqual([true, 2])
+    expect(await turn($, w)).toEqual([true, 3])
+  }
+
+  test('the rule: a run of three unused bands backs off to every third eligible turn; a used one ends it', async () => {
+    expect([BACK_OFF_AFTER, BACK_OFF_EVERY]).toEqual([3, 3])
+
+    let state = NO_BACK_OFF
+
+    for (const isUsed of [false, false]) {
+      state = backOffAfter(state, isUsed)
+    }
+
+    expect(isBackingOff(state)).toBe(false)
+    expect(isBackingOff(backOffAfter(backOffAfter(state, true), false))).toBe(false)
+
+    state = backOffAfter(state, false)
+
+    expect(isBackingOff(state)).toBe(true)
+
+    const ranked: boolean[] = []
+
+    for (let i = 0; i < 6; i++) {
+      const next = backOffTurn(state)
+      ranked.push(next.isRanked)
+      state = next.state
+    }
+
+    expect(ranked).toEqual([false, false, true, false, false, true])
+    expect(backOffAfter(state, true)).toEqual(NO_BACK_OFF)
+    expect(backOffTurn(NO_BACK_OFF)).toEqual({ isRanked: true, state: NO_BACK_OFF })
+  })
+
+  test('after 3 unused bands, the next two eligible turns call no ranker and draw no band, and the third does', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await threeUnused($, w)
+
+    expect(await turn($, w)).toEqual([false, 3])
+    expect(await turn($, w)).toEqual([false, 3])
+    expect(await turn($, w)).toEqual([true, 4])
+  })
+
+  test('dismissed bands count toward the run like ignored ones', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    expect(await turn($, w)).toEqual([true, 1])
+    expect((await $.prompt.submit({ text: '0' })).drop).toBe('Next up: steps dismissed')
+    expect(await turn($, w)).toEqual([true, 2])
+    expect(await turn($, w)).toEqual([true, 3])
+
+    expect(await turn($, w)).toEqual([false, 3])
+  })
+
+  test('using a step resets the run, and the next eligible turn ranks', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await threeUnused($, w)
+    expect(await turn($, w)).toEqual([false, 3])
+    expect(await turn($, w)).toEqual([false, 3])
+    expect(await turn($, w)).toEqual([true, 4])
+
+    expect(await turn($, w, '1')).toEqual([true, 5])
+    expect(w.prompts.at(-1)).toBe('Tidy up the diff you just made.')
+    expect(await countsLine($)).not.toContain('Backing off')
+    expect(await turn($, w)).toEqual([true, 6])
+  })
+
+  test('/next refresh ranks while backing off and ends it', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await threeUnused($, w)
+    expect(await turn($, w)).toEqual([false, 3])
+
+    const answer = await $.command.run({ command: 'next', args: 'refresh', origin: { kind: 'composer' } })
+
+    expect(w.completes).toHaveLength(4)
+    expect(answer.text).toBe('Next up: 1 step above the prompt.')
+    expect(await countsLine($)).not.toContain('Backing off')
+    expect(await turn($, w)).toEqual([true, 5])
+  })
+
+  test('/next sources says when Next up is backing off, on the counts line', async ($, on) => {
+    const w = world(on)
+    await $.session.start(SESSION)
+    await threeUnused($, w)
+
+    expect(await countsLine($)).toBe('Steps this session: 0 used · 0 dismissed · 2 ignored. All sessions: 0 used · 0 dismissed · 2 ignored.')
+
+    await $.prompt.submit({ text: 'Something else.' })
+
+    expect(await countsLine($)).toBe(`Steps this session: 0 used · 0 dismissed · 3 ignored. All sessions: 0 used · 0 dismissed · 3 ignored. ${BACKING_OFF}`)
+
+    await $.session.start(SESSION)
+
+    expect(await countsLine($)).not.toContain('Backing off')
   })
 })
 
