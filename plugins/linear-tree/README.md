@@ -82,7 +82,7 @@ Per project, across sessions: the view, filter, sort, zoom, folds, milestone and
 
 | Setting | Default |
 |---|---|
-| Default project | Empty: the last project shown, else the first project in `.claude/next-up.json` |
+| Default project | Empty: the last project shown, else `/tree` asks which project to show |
 | Linear server | Empty: the connector whose `list_issues` tool is Linear's, found by itself |
 | Refresh every (minutes) | 5; 0 turns it off |
 

@@ -2,8 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { NextStep } from '../types'
-import { CONFIG_PATH, configOf, OPEN_STATES, summaryOf, withSetting, type ProjectConfig } from './config'
-import { asksPerson, budgeted, digestOf, modeOf, MODES, pickOf, rankPromptOf, stepsOf, type Mode } from './rank'
+import { asksPerson, budgeted, DEFAULT_MODE, digestOf, modeOf, MODES, pickOf, rankPromptOf, stepsOf, type Mode } from './rank'
 import {
   DEFAULT_LINEAR_SERVERS,
   githubIssuesOf,
@@ -17,8 +16,9 @@ import {
 const COMMAND = 'next'
 const ITEMS_TTL_MS = 5 * 60 * 1000
 const SOURCE_TIMEOUT_MS = 20_000
-const RANKER_TIMEOUT_MS = 30_000
-const MAX_LINEAR_CALLS = 6
+const MODEL_TIMEOUT_MS = 30_000
+const MODEL = 'haiku'
+const PER_SOURCE = 12
 
 const steps = atom({ plugin: 'next-up', key: 'steps' } as const, [])
 const isThinking = atom({ plugin: 'next-up', key: 'isThinking' } as const, false)
@@ -27,40 +27,31 @@ type SourceRead = { count: number; note: string }
 
 type Settings = {
   mode: Mode
-  githubItems: string
-  linearServer: string
   linearProject: string
-  ranker: string
-  rankerModel: string
-  perSource: number
 }
 
 const runtime: {
   settings: Settings
+  mode: Mode
   cache: { items: WorkItem[]; at: number } | null
   linearServer: string | null
   reads: { github: SourceRead; linear: SourceRead } | null
   lastPrompt: string
+  drawn: NextStep[]
+  isDismissed: boolean
   generation: number
   isWarned: boolean
-  root: string | null
 } = {
-  settings: {
-    mode: 'mixed',
-    githubItems: 'issues-and-prs',
-    linearServer: '',
-    linearProject: '',
-    ranker: 'light',
-    rankerModel: 'haiku',
-    perSource: 12,
-  },
+  settings: { mode: DEFAULT_MODE, linearProject: '' },
+  mode: DEFAULT_MODE,
   cache: null,
   linearServer: null,
   reads: null,
   lastPrompt: '',
+  drawn: [],
+  isDismissed: false,
   generation: 0,
   isWarned: false,
-  root: null,
 }
 
 /** Resolves `work`, or `fallback` once `ms` have passed without it. */
@@ -77,56 +68,21 @@ async function within<T>($: EngineInterface, work: Promise<T>, ms: number, fallb
   }
 }
 
-/** The project's config file: `.claude/next-up.json` at the repository's top, else the session's folder. */
-async function configPath($: EngineInterface): Promise<string> {
-  if (runtime.root === null) {
-    const git = await $.process.run(['git', 'rev-parse', '--show-toplevel']).catch(() => null)
-    runtime.root = git !== null && git.exitCode === 0 && git.stdout.trim() !== '' ? git.stdout.trim() : await $.session.cwd()
-  }
-
-  return `${runtime.root}/${CONFIG_PATH}`
-}
-
-/** The project's criteria from `.claude/next-up.json`, the plugin settings filling the gaps. */
-async function projectConfig($: EngineInterface): Promise<ProjectConfig> {
-  const text = await $.fs.read(await configPath($)).catch(() => null)
-  const config = configOf(typeof text === 'string' ? text : null)
-  const { linearProject, githubItems } = runtime.settings
-
-  return {
-    ...config,
-    linear: { ...(linearProject !== '' ? { projects: [linearProject] } : {}), ...config.linear },
-    github: { items: githubItems, ...config.github },
-  }
-}
-
-async function modeNow($: EngineInterface): Promise<Mode> {
-  const config = await projectConfig($)
-
-  return modeOf(config.mode ?? '') ?? runtime.settings.mode
-}
-
-async function readGithub($: EngineInterface, config: ProjectConfig): Promise<{ items: WorkItem[]; read: SourceRead }> {
-  const github = config.github ?? {}
-  const filters = [
-    ...(github.labels ?? []).flatMap(label => ['--label', label]),
-    ...(github.assignee ? ['--assignee', github.assignee] : []),
-  ]
+/** Open issues and pull requests through the gh CLI, pull requests first. */
+async function readGithub($: EngineInterface): Promise<{ items: WorkItem[]; read: SourceRead }> {
   const issues = await $.process.run([
-    'gh', 'issue', 'list', '--state', 'open', '--limit', '20', '--json', 'number,title,url,labels', ...filters,
+    'gh', 'issue', 'list', '--state', 'open', '--limit', '20', '--json', 'number,title,url,labels',
   ], { timeoutMs: SOURCE_TIMEOUT_MS })
 
   if (issues.exitCode !== 0) {
     return { items: [], read: { count: 0, note: `gh failed: ${issues.stderr.trim().split('\n')[0] ?? 'no output'}` } }
   }
 
-  const pulls = github.items === 'issues'
-    ? null
-    : await $.process.run([
-      'gh', 'pr', 'list', '--state', 'open', '--limit', '10', '--json', 'number,title,url,isDraft', ...filters,
-    ], { timeoutMs: SOURCE_TIMEOUT_MS })
+  const pulls = await $.process.run([
+    'gh', 'pr', 'list', '--state', 'open', '--limit', '10', '--json', 'number,title,url,isDraft',
+  ], { timeoutMs: SOURCE_TIMEOUT_MS })
   const items = [
-    ...(pulls !== null && pulls.exitCode === 0 ? githubPullsOf(pulls.stdout) : []),
+    ...(pulls.exitCode === 0 ? githubPullsOf(pulls.stdout) : []),
     ...githubIssuesOf(issues.stdout),
   ]
 
@@ -163,50 +119,28 @@ async function listIssues($: EngineInterface, server: string, args: Record<strin
 }
 
 /**
- * Reads open Linear issues through a connected Linear MCP server: the one
- * that answered last time, else the configured name, else the usual names
- * in turn. One call per project and label named in the criteria (at most
- * six), merged; the note says which server answered, or why none did.
+ * Reads your open Linear issues, in the Linear project setting when one is
+ * set, through a connected Linear MCP server: the one that answered last
+ * time, else the servers whose `list_issues` tool is Linear's, else the
+ * usual names in turn. The note says which server answered, or why none did.
  */
-async function readLinear($: EngineInterface, config: ProjectConfig): Promise<{ items: WorkItem[]; read: SourceRead }> {
-  const linear = config.linear ?? {}
-  const discovered = runtime.linearServer === null && runtime.settings.linearServer === ''
-    ? linearServersOf(await $.tool.list().catch(() => []))
-    : []
+async function readLinear($: EngineInterface): Promise<{ items: WorkItem[]; read: SourceRead }> {
   const servers = runtime.linearServer !== null
     ? [runtime.linearServer]
-    : runtime.settings.linearServer !== ''
-      ? [runtime.settings.linearServer]
-      : [...new Set([...discovered, ...DEFAULT_LINEAR_SERVERS])]
-  const assignee = linear.assignee ?? 'me'
-  const base: Record<string, unknown> = {
+    : [...new Set([...linearServersOf(await $.tool.list().catch(() => [])), ...DEFAULT_LINEAR_SERVERS])]
+  const { linearProject } = runtime.settings
+  const args: Record<string, unknown> = {
     limit: 50,
     orderBy: 'updatedAt',
     fields: LINEAR_FIELDS,
-    ...(assignee !== 'any' ? { assignee } : {}),
-    ...(linear.team ? { team: linear.team } : {}),
-    ...(linear.query ? { query: linear.query } : {}),
+    assignee: 'me',
+    ...(linearProject !== '' ? { project: linearProject } : {}),
   }
-  const projects = linear.projects?.length ? linear.projects : [null]
-  const labels = linear.labels?.length ? linear.labels : [null]
-  const calls = projects
-    .flatMap(project => labels.map(label => ({ ...base, ...(project ? { project } : {}), ...(label ? { label } : {}) })))
-    .slice(0, MAX_LINEAR_CALLS)
-  const states = linear.states?.length ? linear.states : OPEN_STATES
   const failures: string[] = []
 
   for (const server of servers) {
     try {
-      const texts: string[] = []
-
-      for (const args of calls) {
-        texts.push(await listIssues($, server, args))
-      }
-
-      const seen = new Set<string>()
-      const items = texts
-        .flatMap(text => linearIssuesOf(text, states))
-        .filter(item => !seen.has(item.ref) && seen.add(item.ref) !== undefined)
+      const items = linearIssuesOf(await listIssues($, server, args))
       runtime.linearServer = server
 
       return { items, read: { count: items.length, note: server } }
@@ -226,19 +160,18 @@ async function workItems($: EngineInterface, mode: Mode, isFresh: boolean): Prom
     return cache.items
   }
 
-  const config = await projectConfig($)
-  const off = { items: [], read: { count: 0, note: 'off in this mode' } }
+  const off ={ items: [], read: { count: 0, note: 'off in this mode' } }
   const late = { items: [], read: { count: 0, note: `no answer within ${SOURCE_TIMEOUT_MS / 1000}s` } }
   const failed = (error: unknown) => ({
     items: [],
     read: { count: 0, note: error instanceof Error ? error.message.slice(0, 160) : String(error) },
   })
   const [github, linear] = await Promise.all([
-    mode === 'mixed' || mode === 'github'
-      ? within($, readGithub($, config).catch(failed), SOURCE_TIMEOUT_MS, late)
+    mode === 'github'
+      ? within($, readGithub($).catch(failed), SOURCE_TIMEOUT_MS, late)
       : off,
-    mode === 'mixed' || mode === 'linear'
-      ? within($, readLinear($, config).catch(failed), SOURCE_TIMEOUT_MS, late)
+    mode === 'linear'
+      ? within($, readLinear($).catch(failed), SOURCE_TIMEOUT_MS, late)
       : off,
   ])
   runtime.reads = { github: github.read, linear: linear.read }
@@ -254,36 +187,24 @@ async function workItems($: EngineInterface, mode: Mode, isFresh: boolean): Prom
 }
 
 /**
- * Picks the steps. The light ranker asks a small model about the last
- * exchange and the open items, so no transcript is read; the fork ranker
- * asks the session's own model over its cached transcript, and falls back
- * to the light one when that does not answer (for one, a full context).
- * Nothing waits longer than its time limit, so the band never stays on
- * "thinking".
+ * Picks the steps: Haiku reads the last exchange and the open items, never
+ * the transcript. Nothing waits longer than its time limit, so the band
+ * never stays on "thinking".
  */
 async function propose($: EngineInterface, answer: string, isFresh: boolean): Promise<NextStep[]> {
   const mine = ++runtime.generation
   await update($, isThinking, () => true)
 
   try {
-    const mode = await modeNow($)
-    const items = mode === 'conversation' ? [] : budgeted(await workItems($, mode, isFresh), runtime.settings.perSource)
-    const lightPrompt = rankPromptOf(items, mode, digestOf(runtime.lastPrompt, answer))
-    const late = { isAnswered: false as const, reason: 'aborted' as const }
-    const light = () => within(
+    const mode = runtime.mode
+    const items = mode === 'conversation' ? [] : budgeted(await workItems($, mode, isFresh), PER_SOURCE)
+    const prompt = rankPromptOf(items, mode, digestOf(runtime.lastPrompt, answer))
+    const result = await within(
       $,
-      $.model.complete({ model: runtime.settings.rankerModel, prompt: lightPrompt, maxTokens: 700 }),
-      RANKER_TIMEOUT_MS,
-      late,
+      $.model.complete({ model: MODEL, prompt, maxTokens: 700 }),
+      MODEL_TIMEOUT_MS,
+      { isAnswered: false as const, reason: 'aborted' as const },
     )
-    let result = runtime.settings.ranker === 'fork'
-      ? await within($, $.model.fork({ prompt: rankPromptOf(items, mode, null) }), RANKER_TIMEOUT_MS, late)
-      : await light()
-
-    if (!result.isAnswered && runtime.settings.ranker === 'fork') {
-      result = await light()
-    }
-
     const found = result.isAnswered ? stepsOf(result.text, mode) : []
 
     if (mine === runtime.generation) {
@@ -300,49 +221,57 @@ async function propose($: EngineInterface, answer: string, isFresh: boolean): Pr
 
 async function clear($: EngineInterface): Promise<void> {
   runtime.generation += 1
+  runtime.drawn = []
   await update($, steps, () => [])
   await update($, isThinking, () => false)
 }
 
-async function saveSetting($: EngineInterface, section: string, key: string, value: string): Promise<string> {
-  const path = await configPath($)
-  const text = await $.fs.read(path).catch(() => null)
-  const config = configOf(typeof text === 'string' ? text : null)
-  const changed = section === 'mode' ? { ...config, mode: key } : withSetting(config, section, key, value)
+/**
+ * The band's dismiss Button: clicked, or pressed by its `0` hotkey. When
+ * the hotkey also leaves the `0` in the prompt box, a box holding only
+ * `0` is emptied, and a lone `0` sent right after is dropped. Anything
+ * else typed stays. A `0` that arrives as text without pressing the
+ * Button is handled in `prompt.submit`.
+ */
+async function dismiss($: EngineInterface): Promise<void> {
+  await clear($)
+  runtime.isDismissed = true
+  const box = await $.prompt.read()
 
-  if (typeof changed === 'string') {
-    return changed
+  if (box.text.trim() === '0') {
+    await $.prompt.fill({ text: '', mode: 'replace' })
   }
-
-  await $.fs.write(path, `${JSON.stringify(changed, null, 2)}\n`)
-  runtime.cache = null
-
-  return `Saved to ${CONFIG_PATH}. ${summaryOf(await projectConfig($), await modeNow($))}.`
 }
 
-const HELP = '/next refresh · /next sources · /next config · /next mode <mixed|linear|github|conversation> · '
-  + '/next linear <project|team|label|states|assignee|query> <value|off> · /next github <items|label|assignee> <value|off>'
+const HELP = `/next refresh · /next sources · /next mode <${MODES.join('|')}>`
+
+/**
+ * `/next mode <name>` switches the mode for this session, in memory; the
+ * Mode setting is where each session starts. A name that is no mode
+ * changes nothing and is answered with the current mode and the valid ones.
+ */
+function switchMode(name: string): string {
+  const mode = modeOf(name)
+
+  if (mode === null) {
+    return `Next up mode: ${runtime.mode}. Modes: ${MODES.join(', ')}.`
+  }
+
+  runtime.mode = mode
+  runtime.cache = null
+
+  return `Next up mode: ${mode}, for this session.`
+}
 
 async function commandText($: EngineInterface, args: string): Promise<string> {
-  const [verb = '', key = '', ...rest] = args.trim().split(/\s+/)
-  const value = rest.join(' ')
+  const [verb = '', name = ''] = args.trim().split(/\s+/)
 
   if (verb === 'mode') {
-    return modeOf(key) === null
-      ? `Next up mode: ${await modeNow($)}. Modes: ${MODES.join(', ')}.`
-      : saveSetting($, 'mode', key, '')
-  }
-
-  if (verb === 'linear' || verb === 'github') {
-    return key === '' ? HELP : saveSetting($, verb, key, value)
-  }
-
-  if (verb === 'config') {
-    return `${CONFIG_PATH}: ${summaryOf(await projectConfig($), await modeNow($))}.`
+    return switchMode(name)
   }
 
   if (verb === 'sources') {
-    await workItems($, await modeNow($), true)
+    await workItems($, runtime.mode, true)
     const reads = runtime.reads
 
     return reads === null
@@ -365,28 +294,25 @@ async function commandText($: EngineInterface, args: string): Promise<string> {
  * Next up. When a main turn ends with an answer (not a question to the
  * person), up to three next prompts appear above the prompt: continuations
  * of the current work, open GitHub issues and pull requests (gh CLI) or
- * Linear issues (the connected Linear MCP server), as the mode says, under
- * the project's criteria in `.claude/next-up.json`. Type 1, 2 or 3 and
- * Enter to send one, or click it to edit it first. Nothing enters the
- * conversation's context except what `/next` prints, one short line.
+ * Linear issues (the connected Linear MCP server), as the mode says. Type
+ * 1, 2 or 3 and Enter to send one, or click it to edit it first. Nothing
+ * enters the conversation's context except what `/next` prints, one short
+ * line.
  */
 export const register: Register = (on, options) => {
-  const perSource = Number(options.perSource ?? 12)
   runtime.settings = {
-    mode: modeOf(String(options.mode ?? 'mixed')) ?? 'mixed',
-    githubItems: String(options.githubItems ?? 'issues-and-prs'),
-    linearServer: String(options.linearServer ?? ''),
+    mode: modeOf(String(options.mode ?? DEFAULT_MODE)) ?? DEFAULT_MODE,
     linearProject: String(options.linearProject ?? ''),
-    ranker: String(options.ranker ?? 'light'),
-    rankerModel: String(options.rankerModel ?? 'haiku'),
-    perSource: Number.isFinite(perSource) && perSource > 0 ? Math.min(Math.floor(perSource), 50) : 12,
   }
+  runtime.mode = runtime.settings.mode
 
   on('session.start', async ($, e, next) => {
+    runtime.mode = runtime.settings.mode
+    runtime.cache = null
     await update($, isThinking, () => false)
     await $.command.register({
       name: COMMAND,
-      description: 'Next up: refresh, sources, config, mode, linear <setting> <value>, github <setting> <value>',
+      description: `Next up: refresh, sources, mode <${MODES.join('|')}>`,
     })
 
     return next(e)
@@ -409,15 +335,35 @@ export const register: Register = (on, options) => {
     return result
   })
 
+  /**
+   * A slash command passes through and keeps the steps. Any other typed
+   * prompt clears them; a bare number picks that row of the set the band
+   * last drew, which is what the person sees, not the stored steps.
+   *
+   * A lone `0` dismisses by either route and is never sent: typed as text
+   * while the band shows steps (the desktop delivers it so), it clears
+   * them; right after the dismiss Button ran, it is that Button's digit.
+   * A `0` with no band drawn passes through.
+   */
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin?.kind === 'plugin') {
+    if (e.origin?.kind === 'plugin' || e.command !== undefined) {
       return next(e)
     }
 
-    const current = await read($, steps)
-    const pick = pickOf(e.text, current.length)
+    const isDismissed = runtime.isDismissed
+    runtime.isDismissed = false
+
+    const drawn = runtime.drawn
+
+    if (e.text.trim() === '0' && (isDismissed || drawn.length > 0)) {
+      await clear($)
+
+      return { drop: 'Next up: steps dismissed' }
+    }
+
+    const pick = pickOf(e.text, drawn.length)
     await clear($)
-    const text = pick === null ? e.text : current[pick]!.prompt
+    const text = pick === null ? e.text : drawn[pick]!.prompt
     runtime.lastPrompt = text
 
     return text === e.text ? next(e) : next({ ...e, text })
@@ -425,11 +371,14 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || e.props.isWorking) {
+      runtime.drawn = []
+
       return next(e)
     }
 
     const shown = await read($, steps)
     const thinking = await read($, isThinking)
+    runtime.drawn = shown
 
     if (shown.length === 0 && !thinking) {
       return next(e)
@@ -438,7 +387,7 @@ export const register: Register = (on, options) => {
     const beneath = await next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const width = Math.max(20, e.props.bodyColumns - 16)
-    const mode = await modeNow($)
+    const mode = runtime.mode
 
     if (shown.length === 0) {
       return (
@@ -448,6 +397,8 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+
+    runtime.isDismissed = false
 
     return (
       <Box flexDirection="column">
@@ -467,7 +418,7 @@ export const register: Register = (on, options) => {
             <Text dimColor>{`  ${step.ref ?? step.source}${step.why !== null ? ` · ${step.why}` : ''}`}</Text>
           </Box>
         ))}
-        <Button key="dismiss" plain hotkey="0" label="dismiss" onPress={() => clear($)} />
+        <Button key="dismiss" plain hotkey="0" label="dismiss" onPress={() => dismiss($)} />
         {beneath}
       </Box>
     )

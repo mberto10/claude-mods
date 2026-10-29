@@ -6,8 +6,11 @@ const TITLE_CHARS = 90
 const DIGEST_CHARS = 1500
 const ALL_SOURCES: readonly NextStepSource[] = ['continue', 'github', 'linear']
 
-export const MODES = ['mixed', 'linear', 'github', 'conversation'] as const
+export const MODES = ['linear', 'github', 'conversation'] as const
 export type Mode = (typeof MODES)[number]
+
+/** The mode when none is set, or when the one set is not a mode. */
+export const DEFAULT_MODE: Mode = 'conversation'
 
 /** A mode name, or null when the text is not one. */
 export function modeOf(text: string): Mode | null {
@@ -16,17 +19,15 @@ export function modeOf(text: string): Mode | null {
   return (MODES as readonly string[]).includes(name) ? (name as Mode) : null
 }
 
-/** The step sources a mode allows. */
-export function sourcesOf(mode: Mode): readonly NextStepSource[] {
+/** The one step source a mode draws on. */
+export function sourceOf(mode: Mode): NextStepSource {
   switch (mode) {
     case 'linear':
-      return ['linear']
+      return 'linear'
     case 'github':
-      return ['github']
+      return 'github'
     case 'conversation':
-      return ['continue']
-    default:
-      return ['continue', 'github', 'linear']
+      return 'continue'
   }
 }
 
@@ -54,7 +55,7 @@ export function budgeted(items: readonly WorkItem[], perSource: number): WorkIte
     .map(item => ({ ...item, title: clipped(item.title, TITLE_CHARS) }))
 }
 
-/** The last exchange, shortened, for a ranker that does not read the transcript. */
+/** The last exchange, shortened, so the model that picks the steps needs no transcript. */
 export function digestOf(prompt: string, answer: string): string {
   const half = Math.floor(DIGEST_CHARS / 2)
 
@@ -62,36 +63,38 @@ export function digestOf(prompt: string, answer: string): string {
 }
 
 const GOALS: Record<Mode, string> = {
-  mixed: 'Return one step of each kind that has something to offer: one natural continuation of what was just done, one GitHub item and one Linear item. For each source, prefer the item most related to the current work; otherwise take the first, most important one.',
   linear: 'Return up to three Linear items. Prefer items related to the current work; otherwise keep the given order, which lists the most important first. Do not suggest anything that is not one of these items.',
   github: 'Return up to three GitHub items. Prefer items related to the current work; otherwise keep the given order, which lists pull requests first, then the newest issues. Do not suggest anything that is not one of these items.',
-  conversation: 'Return up to three natural continuations of what was just done.',
+  conversation: 'Return up to three natural continuations of what was just done. Make the steps clearly different from one another.',
 }
 
-/**
- * The question that picks the steps. `digest` is the last exchange for a
- * ranker that does not read the transcript; null when it does.
- */
-export function rankPromptOf(items: readonly WorkItem[], mode: Mode, digest: string | null): string {
-  const allowed = sourcesOf(mode)
-  const listed = items.filter(item => allowed.includes(item.source))
+const RESTRAINT = 'When no step clearly fits the current work, answer []. Never pad to three; fewer steps are fine.'
+
+/** The question that picks the steps; `digest` is the last exchange. */
+export function rankPromptOf(items: readonly WorkItem[], mode: Mode, digest: string): string {
+  const allowed = sourceOf(mode)
+  const listed = items.filter(item => item.source === allowed)
   const list = listed.length === 0
     ? '(none)'
     : listed.map(item => `- ${item.source} ${item.ref}: ${item.title}${item.detail !== '' ? ` [${item.detail}]` : ''}`).join('\n')
 
   return [
-    digest === null ? 'Suggest what the person could do next in this session.' : `Suggest what the person could do next in a coding session.\n\n${digest}`,
+    `Suggest what the person could do next in a coding session.\n\n${digest}`,
     GOALS[mode],
+    RESTRAINT,
     'Write each step as the prompt the person would send the assistant: an instruction, at most 30 words, self-contained, naming the item\'s id when it is about one. Do not suggest something already done.',
     ...(mode === 'conversation' ? [] : ['', 'Open work items:', list]),
     '',
     'Answer with JSON only, no prose:',
-    `[{"label": "<at most 60 characters>", "prompt": "<the prompt>", "source": ${allowed.map(one => `"${one}"`).join(' | ')}, "ref": "<item id, or null>", "why": "<why this one, at most 8 words>"}]`,
+    `[{"label": "<at most 60 characters>", "prompt": "<the prompt>", "source": "${allowed}", "ref": "<item id, or null>", "why": "<why this one, at most 8 words>"}]`,
   ].join('\n')
 }
 
-/** The ranker's answer as at most three valid steps a mode allows. */
-export function stepsOf(text: string, mode: Mode = 'mixed'): NextStep[] {
+/**
+ * The model's answer as at most three valid steps from the mode's source.
+ * A step naming another source is dropped; one naming none is the mode's.
+ */
+export function stepsOf(text: string, mode: Mode = DEFAULT_MODE): NextStep[] {
   const start = text.indexOf('[')
   const end = text.lastIndexOf(']')
 
@@ -111,7 +114,7 @@ export function stepsOf(text: string, mode: Mode = 'mixed'): NextStep[] {
     return []
   }
 
-  const allowed = sourcesOf(mode)
+  const allowed = sourceOf(mode)
   const steps: NextStep[] = []
 
   for (const one of value) {
@@ -125,19 +128,14 @@ export function stepsOf(text: string, mode: Mode = 'mixed'): NextStep[] {
       continue
     }
 
-    const isKnown = ALL_SOURCES.includes(source as NextStepSource)
-    const kind = isKnown
-      ? (allowed.includes(source as NextStepSource) ? (source as NextStepSource) : null)
-      : allowed.length === 1 ? allowed[0]! : 'continue'
-
-    if (kind === null) {
+    if (ALL_SOURCES.includes(source as NextStepSource) && source !== allowed) {
       continue
     }
 
     steps.push({
       label: label.trim().slice(0, 80),
       prompt: prompt.trim(),
-      source: kind,
+      source: allowed,
       ref: typeof ref === 'string' && ref.trim() !== '' ? ref.trim() : null,
       why: typeof why === 'string' && why.trim() !== '' ? clipped(why, 70) : null,
     })

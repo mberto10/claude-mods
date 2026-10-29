@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 · 2026-10-29
+
+- Stands alone: `/tree` with no project named and none shown before opens the Default project setting, else asks which project to show. It no longer reads another mod's files for a project.
+
 ## 0.1.0 · 2026-10-07
 
 First public release.
