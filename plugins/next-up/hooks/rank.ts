@@ -55,7 +55,7 @@ export function budgeted(items: readonly WorkItem[], perSource: number): WorkIte
     .map(item => ({ ...item, title: clipped(item.title, TITLE_CHARS) }))
 }
 
-/** The last exchange, shortened, for a ranker that does not read the transcript. */
+/** The last exchange, shortened, so the model that picks the steps needs no transcript. */
 export function digestOf(prompt: string, answer: string): string {
   const half = Math.floor(DIGEST_CHARS / 2)
 
@@ -65,14 +65,13 @@ export function digestOf(prompt: string, answer: string): string {
 const GOALS: Record<Mode, string> = {
   linear: 'Return up to three Linear items. Prefer items related to the current work; otherwise keep the given order, which lists the most important first. Do not suggest anything that is not one of these items.',
   github: 'Return up to three GitHub items. Prefer items related to the current work; otherwise keep the given order, which lists pull requests first, then the newest issues. Do not suggest anything that is not one of these items.',
-  conversation: 'Return up to three natural continuations of what was just done.',
+  conversation: 'Return up to three natural continuations of what was just done. Make the steps clearly different from one another.',
 }
 
-/**
- * The question that picks the steps. `digest` is the last exchange for a
- * ranker that does not read the transcript; null when it does.
- */
-export function rankPromptOf(items: readonly WorkItem[], mode: Mode, digest: string | null): string {
+const RESTRAINT = 'When no step clearly fits the current work, answer []. Never pad to three; fewer steps are fine.'
+
+/** The question that picks the steps; `digest` is the last exchange. */
+export function rankPromptOf(items: readonly WorkItem[], mode: Mode, digest: string): string {
   const allowed = sourceOf(mode)
   const listed = items.filter(item => item.source === allowed)
   const list = listed.length === 0
@@ -80,8 +79,9 @@ export function rankPromptOf(items: readonly WorkItem[], mode: Mode, digest: str
     : listed.map(item => `- ${item.source} ${item.ref}: ${item.title}${item.detail !== '' ? ` [${item.detail}]` : ''}`).join('\n')
 
   return [
-    digest === null ? 'Suggest what the person could do next in this session.' : `Suggest what the person could do next in a coding session.\n\n${digest}`,
+    `Suggest what the person could do next in a coding session.\n\n${digest}`,
     GOALS[mode],
+    RESTRAINT,
     'Write each step as the prompt the person would send the assistant: an instruction, at most 30 words, self-contained, naming the item\'s id when it is about one. Do not suggest something already done.',
     ...(mode === 'conversation' ? [] : ['', 'Open work items:', list]),
     '',
@@ -91,7 +91,7 @@ export function rankPromptOf(items: readonly WorkItem[], mode: Mode, digest: str
 }
 
 /**
- * The ranker's answer as at most three valid steps from the mode's source.
+ * The model's answer as at most three valid steps from the mode's source.
  * A step naming another source is dropped; one naming none is the mode's.
  */
 export function stepsOf(text: string, mode: Mode = DEFAULT_MODE): NextStep[] {

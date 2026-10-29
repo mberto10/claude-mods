@@ -20,7 +20,7 @@
     "mode": {
       "type": "string",
       "title": "Mode",
-      "description": "Where the steps come from: \"conversation\" (default) continues the current work and reads no source; \"linear\" only suggests your open Linear issues; \"github\" only suggests open GitHub issues and pull requests. \"/next mode <name>\" changes it until changed again.",
+      "description": "Where the steps come from: \"conversation\" (default) continues the current work and reads no source; \"linear\" only suggests your open Linear issues; \"github\" only suggests open GitHub issues and pull requests. \"/next mode <name>\" changes it for the session.",
       "required": false,
       "default": "conversation",
       "options": [
@@ -29,55 +29,12 @@
         "conversation"
       ]
     },
-    "githubItems": {
-      "type": "string",
-      "title": "GitHub items",
-      "description": "Open issues and pull requests (default), or issues only.",
-      "required": false,
-      "default": "issues-and-prs",
-      "options": [
-        "issues-and-prs",
-        "issues"
-      ]
-    },
-    "linearServer": {
-      "type": "string",
-      "title": "Linear server",
-      "description": "The Linear MCP server's name as /mcp lists it. Empty (default): tries \"claude.ai Linear\", \"Linear\" and \"linear\".",
-      "required": false,
-      "default": ""
-    },
     "linearProject": {
       "type": "string",
       "title": "Linear project",
       "description": "Only issues in this Linear project (name, identifier or slug). Empty (default): all your open issues.",
       "required": false,
       "default": ""
-    },
-    "ranker": {
-      "type": "string",
-      "title": "Ranker",
-      "description": "\"light\" (default): a small model reads the last exchange and the open items, never the transcript. \"fork\": the session's own model reads the whole cached transcript; better context, larger requests. Fork falls back to light when it does not answer.",
-      "required": false,
-      "default": "light",
-      "options": [
-        "light",
-        "fork"
-      ]
-    },
-    "rankerModel": {
-      "type": "string",
-      "title": "Light ranker model",
-      "description": "The model the light ranker uses: an alias such as \"haiku\" (default) or a full model id.",
-      "required": false,
-      "default": "haiku"
-    },
-    "perSource": {
-      "type": "number",
-      "title": "Items per source",
-      "description": "At most this many open items from each source go to the ranker, newest first (default 12, at most 50).",
-      "required": false,
-      "default": 12
     }
   }
 }
