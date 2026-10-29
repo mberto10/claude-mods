@@ -12,6 +12,7 @@ import {
   linearServersOf,
   type WorkItem,
 } from './sources'
+import { BACK_OFF_AFTER, BACK_OFF_EVERY, backOffAfter, backOffTurn, isBackingOff, NO_BACK_OFF, type BackOff } from './rank'
 
 const COMMAND = 'next'
 const ITEMS_TTL_MS = 5 * 60 * 1000
@@ -54,6 +55,8 @@ const runtime: {
   /** The band whose outcome is open: its steps, and whether one was clicked into the box. */
   band: { key: string; isClicked: boolean } | null
   counts: Counts
+  /** The session's run of unused bands, and whether Next up is backing off from it. */
+  backOff: BackOff
 } = {
   settings: { mode: DEFAULT_MODE, linearProject: '' },
   mode: DEFAULT_MODE,
@@ -67,6 +70,7 @@ const runtime: {
   isWarned: false,
   band: null,
   counts: { ...NO_COUNTS },
+  backOff: NO_BACK_OFF,
 }
 
 function countsOf(value: unknown): Counts {
@@ -93,6 +97,7 @@ async function settle($: EngineInterface, outcome: Outcome): Promise<void> {
 
   runtime.band = null
   runtime.counts = { ...runtime.counts, [outcome]: runtime.counts[outcome] + 1 }
+  runtime.backOff = backOffAfter(runtime.backOff, outcome === 'used')
 
   try {
     const kept = countsOf(await $.store.get(COUNTS_KEY))
@@ -122,7 +127,22 @@ const tallyOf = (counts: Counts) => `${counts.used} used · ${counts.dismissed} 
 async function countsLine($: EngineInterface): Promise<string> {
   const all = countsOf(await $.store.get(COUNTS_KEY).catch(() => undefined))
 
-  return `Steps this session: ${tallyOf(runtime.counts)}. All sessions: ${tallyOf(all)}.`
+  const backingOff = isBackingOff(runtime.backOff)
+    ? ` Backing off after ${BACK_OFF_AFTER} unused in a row: steps once every ${BACK_OFF_EVERY} eligible turns, until one is used or /next refresh.`
+    : ''
+
+  return `Steps this session: ${tallyOf(runtime.counts)}. All sessions: ${tallyOf(all)}.${backingOff}`
+}
+
+/**
+ * Whether an eligible turn calls the ranker, by the back-off rule in
+ * `backOffTurn`. A turn it skips calls no ranker and draws no band.
+ */
+function ranksNow(): boolean {
+  const { isRanked, state } = backOffTurn(runtime.backOff)
+  runtime.backOff = state
+
+  return isRanked
 }
 
 /** Resolves `work`, or `fallback` once `ms` have passed without it. */
@@ -362,6 +382,7 @@ async function commandText($: EngineInterface, args: string): Promise<string> {
   }
 
   if (verb === 'refresh') {
+    runtime.backOff = NO_BACK_OFF
     const found = await propose($, '', true)
 
     return `Next up: ${found.length} step${found.length === 1 ? '' : 's'} above the prompt.`
@@ -393,6 +414,7 @@ export const register: Register = (on, options) => {
     runtime.cache = null
     runtime.band = null
     runtime.counts = { ...NO_COUNTS }
+    runtime.backOff = NO_BACK_OFF
     await update($, isThinking, () => false)
     await $.command.register({
       name: COMMAND,
@@ -411,6 +433,11 @@ export const register: Register = (on, options) => {
 
     if (shouldRank({ ...e, rateLimits: await rateLimitsOf($) })) {
       const answer = e.answer
+
+      if (!ranksNow()) {
+        return result
+      }
+
       $.clock.after(0, () => {
         void propose($, answer, false).catch(() => clear($))
       })

@@ -76,6 +76,39 @@ export function shouldRank(turn: RankSignals): boolean {
     && turn.rateLimits.every(window => window.percentUsed < USAGE_LIMIT_PERCENT)
 }
 
+/** A run of this many bands in a row that ended dismissed or ignored starts backing off. */
+export const BACK_OFF_AFTER = 3
+
+/** While backing off, the ranker runs on one in this many eligible turns. */
+export const BACK_OFF_EVERY = 3
+
+/** The run of unused bands, and the eligible turns skipped since the ranker last ran. */
+export type BackOff = { unusedRun: number; skipped: number }
+
+export const NO_BACK_OFF: BackOff = { unusedRun: 0, skipped: 0 }
+
+export function isBackingOff(state: BackOff): boolean {
+  return state.unusedRun >= BACK_OFF_AFTER
+}
+
+/** A band ended: a used one ends the run and any backing off, an unused one adds to the run. */
+export function backOffAfter(state: BackOff, isUsed: boolean): BackOff {
+  return isUsed ? NO_BACK_OFF : { ...state, unusedRun: state.unusedRun + 1 }
+}
+
+/**
+ * One eligible turn, one `shouldRank` passed: whether the ranker runs, and
+ * the state after it. While backing off, only every BACK_OFF_EVERY-th
+ * eligible turn ranks; otherwise every one does.
+ */
+export function backOffTurn(state: BackOff): { isRanked: boolean; state: BackOff } {
+  if (isBackingOff(state) && state.skipped < BACK_OFF_EVERY - 1) {
+    return { isRanked: false, state: { ...state, skipped: state.skipped + 1 } }
+  }
+
+  return { isRanked: true, state: { ...state, skipped: 0 } }
+}
+
 function clipped(text: string, chars: number): string {
   const flat = text.replace(/\s+/g, ' ').trim()
 
